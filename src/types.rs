@@ -5,6 +5,7 @@ use serde_json::Value;
 pub enum OutputMode {
     Text,
     Json,
+    StreamJson,
 }
 
 impl OutputMode {
@@ -12,12 +13,14 @@ impl OutputMode {
         match self {
             Self::Text => "text",
             Self::Json => "json",
+            Self::StreamJson => "stream-json",
         }
     }
 
     pub fn parse(raw: Option<&str>) -> Self {
         match raw.unwrap_or("text").trim().to_ascii_lowercase().as_str() {
             "json" => Self::Json,
+            "stream-json" | "stream_json" | "jsonl" => Self::StreamJson,
             _ => Self::Text,
         }
     }
@@ -139,4 +142,21 @@ pub struct AgentRunResult {
     pub status: u16,
     pub body: Value,
     pub run: RunRecord,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutputMode;
+
+    #[test]
+    fn parses_stream_json_aliases() {
+        assert_eq!(OutputMode::parse(Some("stream-json")), OutputMode::StreamJson);
+        assert_eq!(OutputMode::parse(Some("stream_json")), OutputMode::StreamJson);
+        assert_eq!(OutputMode::parse(Some("jsonl")), OutputMode::StreamJson);
+    }
+
+    #[test]
+    fn falls_back_to_text_for_unknown_output_mode() {
+        assert_eq!(OutputMode::parse(Some("yaml")), OutputMode::Text);
+    }
 }

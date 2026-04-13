@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use crate::agent::{
     execute_agent_prompt, get_agent_events, get_agent_run, list_agent_runs, resume_agent_prompt,
+    AgentRunOptions,
 };
 use crate::config::AppConfig;
 use crate::runtime::runtime_diagnostics;
@@ -39,6 +40,8 @@ enum Commands {
 struct StatusArgs {
     #[arg(long)]
     workspace: Option<String>,
+    #[arg(long)]
+    no_auto_launch: bool,
 }
 
 #[derive(Args, Debug)]
@@ -69,6 +72,10 @@ struct ExecArgs {
     json: bool,
     #[arg(short = 'q', long)]
     quiet: bool,
+    #[arg(long)]
+    no_persist: bool,
+    #[arg(long)]
+    no_auto_launch: bool,
 }
 
 #[derive(Args, Debug)]
@@ -89,6 +96,10 @@ struct ResumeArgs {
     json: bool,
     #[arg(short = 'q', long)]
     quiet: bool,
+    #[arg(long)]
+    no_persist: bool,
+    #[arg(long)]
+    no_auto_launch: bool,
 }
 
 #[derive(Args, Debug)]
@@ -111,8 +122,12 @@ pub fn run() -> Result<i32> {
     bootstrap(&config.paths)?;
 
     let code = match cli.command {
-        Commands::Status(args) => cmd_status(&config, args.workspace.as_deref())?,
-        Commands::Models(args) => cmd_models(&config, args.workspace.as_deref())?,
+        Commands::Status(args) => {
+            cmd_status(&config, args.workspace.as_deref(), !args.no_auto_launch)?
+        }
+        Commands::Models(args) => {
+            cmd_models(&config, args.workspace.as_deref(), !args.no_auto_launch)?
+        }
         Commands::Exec(args) => cmd_exec(&config, args)?,
         Commands::Resume(args) => cmd_resume(&config, args)?,
         Commands::Runs(args) => cmd_runs(&config, args.limit)?,
@@ -123,8 +138,8 @@ pub fn run() -> Result<i32> {
     Ok(code)
 }
 
-fn cmd_status(config: &AppConfig, workspace: Option<&str>) -> Result<i32> {
-    match runtime_diagnostics(config, workspace) {
+fn cmd_status(config: &AppConfig, workspace: Option<&str>, auto_launch: bool) -> Result<i32> {
+    match runtime_diagnostics(config, workspace, auto_launch) {
         Ok(body) => {
             print_json(&json!({ "ok": true, "status": body }));
             Ok(0)
@@ -136,8 +151,8 @@ fn cmd_status(config: &AppConfig, workspace: Option<&str>) -> Result<i32> {
     }
 }
 
-fn cmd_models(config: &AppConfig, workspace: Option<&str>) -> Result<i32> {
-    match runtime_diagnostics(config, workspace) {
+fn cmd_models(config: &AppConfig, workspace: Option<&str>, auto_launch: bool) -> Result<i32> {
+    match runtime_diagnostics(config, workspace, auto_launch) {
         Ok(body) => {
             let models = body.get("models").cloned().unwrap_or_else(|| json!([]));
             print_json(&json!({ "ok": true, "models": models }));
@@ -166,20 +181,22 @@ fn cmd_exec(config: &AppConfig, args: ExecArgs) -> Result<i32> {
             return Ok(1);
         }
     };
+    let options = AgentRunOptions {
+        persist: !args.no_persist,
+        auto_launch: !args.no_auto_launch,
+    };
     let result = execute_agent_prompt(
         config,
         &prompt,
         args.model.as_deref(),
         args.workspace.as_deref(),
+        options,
     );
     let output_mode = resolve_output_mode(config, args.output.as_deref(), args.json);
-    if matches!(result.status, 200 | 202) {
-        print_run_output(&result.run, output_mode, args.quiet);
-        Ok(0)
-    } else {
-        print_json(&json!({ "ok": false, "error": result.body.get("error"), "run": result.run }));
-        Ok(1)
-    }
+    let ok = matches!(result.status, 200 | 202);
+    let error = result.body.get("error").filter(|value| !value.is_null());
+    print_run_result(&result.run, output_mode, args.quiet, ok, error);
+    Ok(if ok { 0 } else { 1 })
 }
 
 fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
@@ -198,21 +215,23 @@ fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
             return Ok(1);
         }
     };
+    let options = AgentRunOptions {
+        persist: !args.no_persist,
+        auto_launch: !args.no_auto_launch,
+    };
     let result = resume_agent_prompt(
         config,
         &args.run_id,
         &prompt,
         args.model.as_deref(),
         args.workspace.as_deref(),
+        options,
     );
     let output_mode = resolve_output_mode(config, args.output.as_deref(), args.json);
-    if matches!(result.status, 200 | 202) {
-        print_run_output(&result.run, output_mode, args.quiet);
-        Ok(0)
-    } else {
-        print_json(&json!({ "ok": false, "error": result.body.get("error"), "run": result.run }));
-        Ok(1)
-    }
+    let ok = matches!(result.status, 200 | 202);
+    let error = result.body.get("error").filter(|value| !value.is_null());
+    print_run_result(&result.run, output_mode, args.quiet, ok, error);
+    Ok(if ok { 0 } else { 1 })
 }
 
 fn cmd_runs(config: &AppConfig, limit: usize) -> Result<i32> {
@@ -342,22 +361,73 @@ fn resolve_output_mode(config: &AppConfig, output: Option<&str>, as_json: bool) 
     }
 }
 
-fn print_run_output(run: &crate::types::RunRecord, output_mode: OutputMode, quiet: bool) {
+fn print_run_result(
+    run: &crate::types::RunRecord,
+    output_mode: OutputMode,
+    quiet: bool,
+    ok: bool,
+    error: Option<&Value>,
+) {
     match output_mode {
         OutputMode::Json => {
-            print_json(&json!({ "ok": true, "run": run }));
+            print_json(&build_run_result_payload(run, ok, error));
         }
         OutputMode::Text => {
-            if let Some(text) = run.output_text.as_ref().filter(|value| !value.is_empty()) {
-                println!("{}", text);
-                if !quiet {
-                    eprintln!("\nrun_id: {}", run.run_id);
+            if ok {
+                if let Some(text) = run.output_text.as_ref().filter(|value| !value.is_empty()) {
+                    println!("{}", text);
+                    if !quiet {
+                        eprintln!("\nrun_id: {}", run.run_id);
+                    }
+                } else {
+                    print_json(&build_run_result_payload(run, ok, error));
                 }
             } else {
-                print_json(&json!({ "ok": true, "run": run }));
+                print_json(&build_run_result_payload(run, ok, error));
             }
         }
+        OutputMode::StreamJson => {
+            for (event_index, event) in run.events.iter().enumerate() {
+                print_json_line(&json!({
+                    "kind": "run.event",
+                    "runId": run.run_id,
+                    "eventIndex": event_index,
+                    "event": event,
+                }));
+            }
+            let mut line = json!({
+                "kind": "run.result",
+                "runId": run.run_id,
+                "ok": ok,
+                "httpStatus": run.http_status,
+                "status": run.status,
+                "run": run,
+            });
+            if let Some(error) = error {
+                line["error"] = error.clone();
+            }
+            print_json_line(&line);
+        }
     }
+}
+
+fn build_run_result_payload(
+    run: &crate::types::RunRecord,
+    ok: bool,
+    error: Option<&Value>,
+) -> Value {
+    let mut payload = json!({ "ok": ok, "run": run });
+    if let Some(error) = error {
+        payload["error"] = error.clone();
+    }
+    payload
+}
+
+fn print_json_line(value: &Value) {
+    println!(
+        "{}",
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 fn print_json(value: &serde_json::Value) {

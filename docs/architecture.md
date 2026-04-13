@@ -46,6 +46,12 @@ Execution flow:
 7. poll `GetCascadeTrajectorySteps` and `GetCascadeTrajectory`
 8. store a normalized run record
 
+The agent-facing CLI contract should stay explicit about:
+
+- output mode selection for automation, including `stream-json`
+- whether a call persists into the local run ledger
+- whether a command may auto-launch a headless runtime as a side effect
+
 ## Persistence model
 
 Each run is written as one JSON file in the local run store.
@@ -74,6 +80,8 @@ The current product boundary is intentionally narrow:
 - `show`
 - `events`
 - `settings`
+
+The boundary is optimized for agent/script callers first, not for human terminal UX first.
 
 No HTTP server is part of the current target architecture.
 

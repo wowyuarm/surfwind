@@ -297,9 +297,13 @@ pub fn touch_managed_runtime(config: &AppConfig, pid: i32) -> Result<()> {
     save_managed_runtime_records(config, &records)
 }
 
-pub fn runtime_diagnostics(config: &AppConfig, workspace: Option<&str>) -> Result<Value> {
+pub fn runtime_diagnostics(
+    config: &AppConfig,
+    workspace: Option<&str>,
+    auto_launch: bool,
+) -> Result<Value> {
     let runtimes = discover_runtimes(config).unwrap_or_default();
-    let runtime = discover_runtime(config, workspace, true)?;
+    let runtime = discover_runtime(config, workspace, auto_launch)?;
     if runtime.managed_by_surfwind {
         let _ = touch_managed_runtime(config, runtime.pid);
     }
@@ -329,6 +333,8 @@ pub fn runtime_diagnostics(config: &AppConfig, workspace: Option<&str>) -> Resul
         "apiKeyPresent": !runtime.api_key.is_empty(),
         "csrfPresent": !runtime.csrf.is_empty(),
         "managedBySurfwind": runtime.managed_by_surfwind,
+        "autoLaunchRequested": auto_launch,
+        "autoLaunchEffective": auto_launch && config.auto_launch_enabled,
         "models": models,
         "availableRuntimes": runtimes.into_iter().map(|item| {
             json!({

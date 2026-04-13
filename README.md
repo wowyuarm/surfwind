@@ -1,17 +1,18 @@
 # surfwind
 
-`surfwind` is a Rust-only, headless-first CLI for driving the local Windsurf runtime.
+`surfwind` is an unofficial, Rust-only, agent-first CLI bridge for driving the local Windsurf runtime.
 
-## Product focus
+## Positioning
 
-- pure CLI
-- headless workspace bootstrap
-- local run persistence
-- resume-capable cascade flows
-- no default UI session hijacking
-- no Python runtime dependency
+- primary consumer: agents, scripts, and orchestrators
+- reuse local Windsurf runtime state when possible
+- bootstrap a dedicated headless `language_server` for a workspace when needed
+- keep runtime side effects and run persistence explicit
+- stay pure CLI, Rust-only, and non-UI-coupled
 
-## What it does
+This project is not trying to become a general human-first terminal UX layer. Its job is to be the most reliable local bridge between automation and the Windsurf runtime that already exists on the machine.
+
+## Core behavior
 
 `surfwind` discovers or bootstraps a local Windsurf `language_server`, issues RPCs to it, and stores productized run records locally.
 
@@ -19,7 +20,28 @@ When a workspace is requested and no compatible runtime is already attached, it 
 
 The default attach path does not use the current Windsurf UI session hook and does not rely on `remote-cli` window behavior.
 
-## What it does not do
+## Agent-first contracts
+
+- `exec` and `resume` support `text`, `json`, and `stream-json` output
+- `stream-json` emits normalized `run.event` JSONL records followed by a final `run.result`
+- `exec` and `resume` support `--no-persist` for ephemeral runs
+- `status`, `models`, `exec`, and `resume` support `--no-auto-launch` when the caller wants side effects to stay explicit
+- long-running runs may finish polling as `running` with HTTP-style status `202`
+
+## Core commands
+
+```bash
+cargo run -- status --no-auto-launch
+cargo run -- models --no-auto-launch
+cargo run -- exec --workspace /path/to/repo --output stream-json --no-persist "summarize this repository"
+cargo run -- resume <run-id> "continue"
+cargo run -- runs
+cargo run -- show <run-id>
+cargo run -- events <run-id>
+cargo run -- settings show
+```
+
+## Non-goals
 
 - no HTTP API server
 - no `serve` command
@@ -31,25 +53,6 @@ The default attach path does not use the current Windsurf UI session hook and do
 
 ```bash
 cargo build
-```
-
-Run during development:
-
-```bash
-cargo run -- status
-```
-
-## Core commands
-
-```bash
-cargo run -- status
-cargo run -- models
-cargo run -- exec --workspace /path/to/repo "summarize this repository"
-cargo run -- resume <run-id> "continue"
-cargo run -- runs
-cargo run -- show <run-id>
-cargo run -- events <run-id>
-cargo run -- settings show
 ```
 
 ## Headless behavior
@@ -76,7 +79,3 @@ By default this project uses its own home directory:
 ```
 
 Compatible environment variables such as `SURFWIND_HOME`, `SURFWIND_MODEL_UID`, `SURFWIND_METADATA_API_KEY`, `SURFWIND_LANGUAGE_SERVER_PATH`, and `SURFWIND_DATABASE_DIR` are still honored.
-
-## Status
-
-This project currently targets the core CLI flow only. If an HTTP API is needed later, it should be implemented natively in Rust rather than migrated from the legacy Python server surface.

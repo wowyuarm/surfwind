@@ -96,13 +96,9 @@ fn normalize_settings(raw: Option<&Map<String, Value>>, defaults: &SettingsData)
             .to_string()
     };
 
-    let output = match get_string("output", &defaults.output)
-        .to_ascii_lowercase()
+    let output = OutputMode::parse(Some(&get_string("output", &defaults.output)))
         .as_str()
-    {
-        "json" => "json".to_string(),
-        _ => defaults.output.clone(),
-    };
+        .to_string();
 
     SettingsData {
         model: get_string("model", &defaults.model),
@@ -199,8 +195,37 @@ fn coerce_setting_value(key: &str, value: &str) -> Result<Value> {
         "output" => match value.trim().to_ascii_lowercase().as_str() {
             "text" => Ok(Value::String("text".to_string())),
             "json" => Ok(Value::String("json".to_string())),
-            _ => Err(anyhow!("output must be text or json")),
+            "stream-json" | "stream_json" | "jsonl" => {
+                Ok(Value::String("stream-json".to_string()))
+            }
+            _ => Err(anyhow!("output must be text, json, or stream-json")),
         },
         _ => Err(anyhow!("unknown setting key: {}", key)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{coerce_setting_value, default_settings, normalize_settings, resolve_paths};
+    use serde_json::{json, Map, Value};
+
+    #[test]
+    fn normalizes_stream_json_output() {
+        let paths = resolve_paths();
+        let defaults = default_settings(&paths);
+        let mut raw = Map::new();
+        raw.insert("output".to_string(), json!("jsonl"));
+
+        let settings = normalize_settings(Some(&raw), &defaults);
+
+        assert_eq!(settings.output, "stream-json");
+    }
+
+    #[test]
+    fn coerces_stream_json_output_setting() {
+        assert_eq!(
+            coerce_setting_value("output", "stream_json").unwrap(),
+            Value::String("stream-json".to_string())
+        );
     }
 }

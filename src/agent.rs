@@ -26,17 +26,34 @@ struct ParsedToolCall {
     arguments_json: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct AgentRunOptions {
+    pub persist: bool,
+    pub auto_launch: bool,
+}
+
+impl Default for AgentRunOptions {
+    fn default() -> Self {
+        Self {
+            persist: true,
+            auto_launch: true,
+        }
+    }
+}
+
 pub fn execute_agent_prompt(
     config: &AppConfig,
     prompt: &str,
     model: Option<&str>,
     workspace: Option<&str>,
+    options: AgentRunOptions,
 ) -> AgentRunResult {
     execute_run(
         config,
         prompt,
         model,
         workspace,
+        options,
         "/v1/agent/exec",
         None,
         "exec",
@@ -52,11 +69,12 @@ pub fn resume_agent_prompt(
     prompt: &str,
     model: Option<&str>,
     workspace: Option<&str>,
+    options: AgentRunOptions,
 ) -> AgentRunResult {
     let created_at = now_iso();
     let Some(parent) = get_run(config, parent_run_id).ok().flatten() else {
         let run_id = new_run_id();
-        let record = simple_failed_run(
+        let mut record = simple_failed_run(
             run_id,
             "resume",
             "/v1/agent/runs/resume",
@@ -67,7 +85,8 @@ pub fn resume_agent_prompt(
             404,
             created_at,
         );
-        let _ = save_run(config, &record);
+        apply_run_record_options(&mut record, config, options);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 404,
             body: json!({
@@ -80,7 +99,7 @@ pub fn resume_agent_prompt(
     let parent = reconcile_and_store_run(config, parent);
     if parent.status == "running" {
         let run_id = new_run_id();
-        let record = simple_failed_run(
+        let mut record = simple_failed_run(
             run_id,
             "resume",
             "/v1/agent/runs/resume",
@@ -91,7 +110,8 @@ pub fn resume_agent_prompt(
             409,
             created_at,
         );
-        let _ = save_run(config, &record);
+        apply_run_record_options(&mut record, config, options);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 409,
             body: json!({
@@ -104,7 +124,7 @@ pub fn resume_agent_prompt(
 
     let Some(cascade_id) = parent.cascade_id.clone() else {
         let run_id = new_run_id();
-        let record = simple_failed_run(
+        let mut record = simple_failed_run(
             run_id,
             "resume",
             "/v1/agent/runs/resume",
@@ -115,7 +135,8 @@ pub fn resume_agent_prompt(
             400,
             created_at,
         );
-        let _ = save_run(config, &record);
+        apply_run_record_options(&mut record, config, options);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 400,
             body: json!({
@@ -139,6 +160,7 @@ pub fn resume_agent_prompt(
         prompt,
         model.or(Some(parent.requested_model_uid.as_str())),
         workspace.as_deref(),
+        options,
         "/v1/agent/runs/resume",
         None,
         "resume",
@@ -388,6 +410,7 @@ fn execute_run(
     prompt: &str,
     model: Option<&str>,
     workspace: Option<&str>,
+    options: AgentRunOptions,
     path: &str,
     run_id: Option<String>,
     mode: &str,
@@ -404,6 +427,9 @@ fn execute_run(
         "startedAt": created_at,
         "stage": "validate_request",
         "mode": mode,
+        "persisted": options.persist,
+        "autoLaunchRequested": options.auto_launch,
+        "autoLaunchEffective": options.auto_launch && config.auto_launch_enabled,
     });
     let mut events = vec![event(
         "run.created",
@@ -413,6 +439,10 @@ fn execute_run(
             "parentRunId": parent_run_id,
         }),
     )];
+    events.push(event(
+        "run.options",
+        agent_run_options_payload(config, options),
+    ));
 
     if prompt.trim().is_empty() {
         summary["error"] = json!("prompt_required");
@@ -437,7 +467,7 @@ fn execute_run(
             0,
             &created_at,
         );
-        let _ = save_run(config, &record);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 400,
             body: json!({
@@ -487,7 +517,7 @@ fn execute_run(
                     0,
                     &created_at,
                 );
-                let _ = save_run(config, &record);
+                store_run_if_enabled(config, options.persist, &record);
                 return AgentRunResult {
                     status: 400,
                     body: json!({
@@ -508,7 +538,7 @@ fn execute_run(
         summary["effectivePromptChars"] = json!(effective_prompt.len());
     }
 
-    let runtime = match discover_runtime(config, requested_workspace_root.as_deref(), true) {
+    let runtime = match discover_runtime(config, requested_workspace_root.as_deref(), options.auto_launch) {
         Ok(runtime) => runtime,
         Err(err) => {
             let text = err.to_string();
@@ -556,7 +586,7 @@ fn execute_run(
                 0,
                 &created_at,
             );
-            let _ = save_run(config, &record);
+            store_run_if_enabled(config, options.persist, &record);
             return AgentRunResult {
                 status: status_code,
                 body: json!({
@@ -612,7 +642,7 @@ fn execute_run(
             0,
             &created_at,
         );
-        let _ = save_run(config, &record);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 502,
             body: json!({
@@ -662,7 +692,7 @@ fn execute_run(
             0,
             &created_at,
         );
-        let _ = save_run(config, &record);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 502,
             body: json!({
@@ -713,7 +743,7 @@ fn execute_run(
                     0,
                     &created_at,
                 );
-                let _ = save_run(config, &record);
+                store_run_if_enabled(config, options.persist, &record);
                 return AgentRunResult {
                     status: 502,
                     body: json!({
@@ -754,7 +784,7 @@ fn execute_run(
                     0,
                     &created_at,
                 );
-                let _ = save_run(config, &record);
+                store_run_if_enabled(config, options.persist, &record);
                 return AgentRunResult {
                     status: 502,
                     body: json!({
@@ -811,7 +841,7 @@ fn execute_run(
             0,
             &created_at,
         );
-        let _ = save_run(config, &record);
+        store_run_if_enabled(config, options.persist, &record);
         return AgentRunResult {
             status: 502,
             body: json!({
@@ -1027,7 +1057,7 @@ fn execute_run(
         latest_steps.len(),
         &created_at,
     );
-    let _ = save_run(config, &record);
+    store_run_if_enabled(config, options.persist, &record);
 
     let mut body = json!({ "run": record.clone() });
     if let Some(error) = error_short {
@@ -1037,6 +1067,36 @@ fn execute_run(
         status: status_code,
         body,
         run: record,
+    }
+}
+
+fn agent_run_options_payload(config: &AppConfig, options: AgentRunOptions) -> Value {
+    json!({
+        "persist": options.persist,
+        "autoLaunchRequested": options.auto_launch,
+        "autoLaunchEffective": options.auto_launch && config.auto_launch_enabled,
+    })
+}
+
+fn apply_run_record_options(record: &mut RunRecord, config: &AppConfig, options: AgentRunOptions) {
+    record.summary["persisted"] = json!(options.persist);
+    record.summary["autoLaunchRequested"] = json!(options.auto_launch);
+    record.summary["autoLaunchEffective"] = json!(options.auto_launch && config.auto_launch_enabled);
+    if !record
+        .events
+        .iter()
+        .any(|event| event.get("type").and_then(Value::as_str) == Some("run.options"))
+    {
+        let insert_at = record.events.len().min(1);
+        record
+            .events
+            .insert(insert_at, event("run.options", agent_run_options_payload(config, options)));
+    }
+}
+
+fn store_run_if_enabled(config: &AppConfig, persist: bool, record: &RunRecord) {
+    if persist {
+        let _ = save_run(config, record);
     }
 }
 
