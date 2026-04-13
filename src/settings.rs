@@ -21,6 +21,7 @@ pub struct SettingsPaths {
     pub settings_path: PathBuf,
     pub runs_dir: PathBuf,
     pub logs_dir: PathBuf,
+    pub managed_runtimes_path: PathBuf,
 }
 
 fn env_string(keys: &[&str]) -> Option<String> {
@@ -49,13 +50,14 @@ pub fn resolve_paths() -> SettingsPaths {
         settings_path: home_dir.join("settings.json"),
         runs_dir: home_dir.join("runs"),
         logs_dir: home_dir.join("logs"),
+        managed_runtimes_path: home_dir.join("managed-runtimes.json"),
         home_dir,
     }
 }
 
 pub fn default_settings(paths: &SettingsPaths) -> SettingsData {
     SettingsData {
-        model: "kimi-k2-5".to_string(),
+        model: "swe-1-6".to_string(),
         run_store_dir: display_path(&paths.runs_dir),
         output: OutputMode::Text.as_str().to_string(),
     }

@@ -41,6 +41,7 @@ pub struct RuntimeState {
     pub pid: i32,
     pub csrf: String,
     pub workspace_id: Option<String>,
+    pub managed_by_surfwind: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,8 +100,8 @@ pub struct RunRecord {
     pub created_at: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
-    #[serde(rename = "completedAt")]
-    pub completed_at: String,
+    #[serde(rename = "completedAt", skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
     pub summary: Value,
     pub events: Vec<Value>,
 }
