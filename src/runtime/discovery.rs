@@ -464,7 +464,6 @@ fn is_likely_api_key(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::headless::parse_iso_timestamp;
     use std::path::PathBuf;
 
     #[test]
