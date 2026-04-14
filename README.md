@@ -1,67 +1,42 @@
 # surfwind
 
-`surfwind` is an unofficial, Rust-only, agent-first CLI bridge for driving the local Windsurf runtime.
+`surfwind` is an unofficial, non-interactive agent-first Rust CLI bridge for driving the local Windsurf runtime.
 
-## Positioning
+## What is surfwind?
 
-- primary consumer: agents, scripts, and orchestrators
-- reuse local Windsurf runtime state when possible
-- bootstrap a dedicated headless `language_server` for a workspace when needed
-- keep runtime side effects and run persistence explicit
-- stay pure CLI, Rust-only, and non-UI-coupled
+`surfwind` is a non-interactive CLI for driving the local Windsurf runtime. Unlike general-purpose agent CLIs like `claude -p` or `codex exec`, it is specifically designed to:
 
-This project is not trying to become a general human-first terminal UX layer. Its job is to be the most reliable local bridge between automation and the Windsurf runtime that already exists on the machine.
+- Bridge directly to Windsurf's `language_server` for local model execution
+- Reuse existing Windsurf runtime state when possible
+- Provide workspace-scoped execution with explicit safety boundaries
+- Maintain a durable local run ledger for audit, resume, and debugging
 
-## Core behavior
+Think of it as the most reliable way for automation and orchestration systems to interact with the Windsurf runtime already installed on your machine.
 
-`surfwind` discovers or bootstraps a local Windsurf `language_server`, issues RPCs to it, and stores productized run records locally.
-
-When a workspace is requested and no compatible runtime is already attached, it starts a dedicated headless `language_server` child for that repository using `--run_child`.
-
-The default attach path does not use the current Windsurf UI session hook and does not rely on `remote-cli` window behavior.
-
-## Agent-first contracts
-
-- `exec` and `resume` support `text`, `json`, and `stream-json` output
-- `stream-json` emits normalized `run.event` JSONL records followed by a final `run.result`
-- `exec` and `resume` support `--strict-json` and `--output-schema <path>` to validate final assistant output at the CLI boundary
-- when structured output validation succeeds, `json` and `stream-json` include the parsed final `result`; when it fails, the CLI returns a non-zero exit and `failureKind: output_contract`
-- `exec` and `resume` support `--timeout-seconds <int>` for explicit command-level timeout control; timed-out runs return `timeout_reached`
-- `exec` and `resume` support `--output-last-message` when a caller only wants the final assistant text
-- `exec` and `resume` support `--output-last-message-file <path>` and `--result-file <path>` for deterministic artifact output
-- `exec` and `resume` support `--no-persist` for ephemeral runs
-- `status`, `models`, `exec`, and `resume` support `--no-auto-launch` when the caller wants side effects to stay explicit
-- `resume --last`, `show latest`, and `events latest` let callers target the newest persisted run without pre-querying the ledger
-- `runs --status <status>` and `runs --workspace <path>` support common ledger filtering from the CLI surface
-- `settings keys` and `settings describe [key]` expose the stable settings contract directly from the CLI
-- long-running runs may finish polling as `running` with HTTP-style status `202`
-
-## Core commands
+## Quick Start
 
 ```bash
-cargo run -- status --no-auto-launch
-cargo run -- models --no-auto-launch
-cargo run -- exec --workspace /path/to/repo --output stream-json --no-persist "summarize this repository"
-cargo run -- exec --workspace /path/to/repo --output-last-message "reply with the final answer only"
-cargo run -- exec --workspace /path/to/repo --strict-json --json "reply with a single JSON object"
-cargo run -- exec --workspace /path/to/repo --output-schema ./result.schema.json --json "respond using the requested schema"
-cargo run -- exec --workspace /path/to/repo --timeout-seconds 120 --json "solve the task within two minutes"
-cargo run -- exec --workspace /path/to/repo --result-file ./artifacts/result.json --output-last-message-file ./artifacts/final.txt "produce a final answer and save artifacts"
-cargo run -- resume --last "continue"
-cargo run -- runs --status failed --workspace /path/to/repo
-cargo run -- show latest
-cargo run -- events latest
-cargo run -- settings keys
-cargo run -- settings describe output
+# Check runtime status
+surfwind status
+
+# List available models
+surfwind models
+
+# Run a simple prompt
+surfwind exec --workspace /path/to/repo "summarize this codebase"
+
+# Get structured output
+surfwind exec --workspace /path/to/repo --output stream-json "explain the main function"
 ```
 
-## Non-goals
+## Key Features
 
-- no HTTP API server
-- no `serve` command
-- no `smoke` command
-- no Python package entrypoint
-- no default reuse of UI IPC hooks for workspace switching
+- **Multiple output formats** — `text`, `json`, or `stream-json` (JSONL events) for different integration needs
+- **Structured output** — JSON Schema validation with `--output-schema`
+- **Artifact extraction** — Save final messages and structured results to files
+- **Session management** — Resume runs, query history, filter by status/workspace
+- **Explicit control** — `--no-auto-launch` and `--no-persist` for predictable automation
+- **Non-interactive** — No TUI, no prompts—built for scripts and CI/CD pipelines
 
 ## Installation
 
@@ -69,7 +44,7 @@ cargo run -- settings describe output
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/surfwind.git
+git clone https://github.com/wowyuarm/surfwind.git
 cd surfwind
 
 # Build and install locally
@@ -80,13 +55,7 @@ cargo build
 # The binary will be at target/release/surfwind
 ```
 
-## Build
-
-```bash
-cargo build
-```
-
-## Headless behavior
+## Architecture
 
 The workspace bootstrap path is intentionally non-UI:
 
@@ -97,6 +66,14 @@ The workspace bootstrap path is intentionally non-UI:
 - poll runtime discovery until the workspace-specific runtime appears
 
 If a run is still executing when polling ends, the CLI preserves that as a `running` run with HTTP-style status `202` in the stored record, while still returning structured output to the caller.
+
+## Non-goals
+
+- HTTP API server or `serve` command
+- Interactive TUI or human-first terminal UX
+- Python package entrypoint
+- General-purpose agent framework (not competing with `claude -p` or `codex exec`)
+- Cloud execution or remote runtime management
 
 ## Local state
 
@@ -109,4 +86,4 @@ By default this project uses its own home directory:
   logs/
 ```
 
-Compatible environment variables such as `SURFWIND_HOME`, `SURFWIND_MODEL_UID`, `SURFWIND_METADATA_API_KEY`, `SURFWIND_LANGUAGE_SERVER_PATH`, and `SURFWIND_DATABASE_DIR` are still honored.
+Environment variables: `SURFWIND_HOME`, `SURFWIND_MODEL_UID`, `SURFWIND_METADATA_API_KEY`, `SURFWIND_LANGUAGE_SERVER_PATH`, `SURFWIND_DATABASE_DIR`
