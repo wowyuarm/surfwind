@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::models::resolve_requested_model_uid as resolve_shared_requested_model_uid;
 use super::poll::reconcile_and_store_run;
 use crate::config::AppConfig;
 use crate::runstore::{get_run, save_run};
@@ -842,12 +843,7 @@ fn store_run_if_enabled(config: &AppConfig, persist: bool, record: &RunRecord) {
 }
 
 fn requested_model_uid(model: Option<&str>, fallback: Option<&str>) -> String {
-    model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
-        .unwrap_or("swe-1-6")
-        .to_string()
+    resolve_shared_requested_model_uid(model, fallback)
 }
 
 fn new_run_id() -> String {

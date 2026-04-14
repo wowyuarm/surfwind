@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::AppConfig;
+use crate::models::filter_public_models;
 use crate::types::{ModelInfo, RpcResponse, RuntimeState};
 
 const LANGUAGE_SERVER_RPC_PATH: &str = "exa.language_server_pb.LanguageServerService";
@@ -142,7 +143,11 @@ pub fn discover_models(config: &AppConfig, active: &ActiveRuntimeContext) -> Vec
                 deduped.insert(key, decorate_model(row));
             }
         }
-        return deduped.into_values().collect();
+        let filtered = filter_public_models(&deduped.into_values().collect::<Vec<_>>());
+        if !filtered.is_empty() {
+            return filtered;
+        }
+        return config.default_models();
     }
 
     let mut ids = BTreeSet::new();
@@ -150,17 +155,24 @@ pub fn discover_models(config: &AppConfig, active: &ActiveRuntimeContext) -> Vec
     if ids.is_empty() {
         return config.default_models();
     }
-    ids.into_iter()
-        .map(|id| {
-            decorate_model(ModelInfo {
-                id,
-                object: "model".to_string(),
-                owned_by: "windsurf-local".to_string(),
-                label: None,
-                provider: None,
+    let filtered = filter_public_models(
+        &ids.into_iter()
+            .map(|id| {
+                decorate_model(ModelInfo {
+                    id,
+                    object: "model".to_string(),
+                    owned_by: "windsurf-local".to_string(),
+                    label: None,
+                    provider: None,
+                })
             })
-        })
-        .collect()
+            .collect::<Vec<_>>(),
+    );
+    if filtered.is_empty() {
+        config.default_models()
+    } else {
+        filtered
+    }
 }
 
 pub(crate) fn run_ss(args: &[&str]) -> Result<String> {

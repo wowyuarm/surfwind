@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod cli;
 pub mod config;
+pub mod models;
 pub mod runstore;
 pub mod runtime;
 pub mod settings;

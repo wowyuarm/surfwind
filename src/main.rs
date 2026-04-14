@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod config;
+mod models;
 mod runstore;
 mod runtime;
 mod settings;

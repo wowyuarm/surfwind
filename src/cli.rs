@@ -11,7 +11,7 @@ use crate::agent::{
 use crate::config::AppConfig;
 use crate::runtime::runtime_diagnostics;
 use crate::settings::{bootstrap, load_settings, read_setting, unset_setting, write_setting};
-use crate::types::OutputMode;
+use crate::types::{ModelInfo, OutputMode};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,23 +36,37 @@ enum Commands {
     Settings(SettingsArgs),
 }
 
+#[derive(Args, Debug, Clone, Default)]
+struct ReadOutputArgs {
+    #[arg(long)]
+    output: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Args, Debug)]
 struct StatusArgs {
     #[arg(long)]
     workspace: Option<String>,
     #[arg(long)]
     no_auto_launch: bool,
+    #[command(flatten)]
+    output: ReadOutputArgs,
 }
 
 #[derive(Args, Debug)]
 struct RunsArgs {
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    #[command(flatten)]
+    output: ReadOutputArgs,
 }
 
 #[derive(Args, Debug)]
 struct RunIdArgs {
     run_id: String,
+    #[command(flatten)]
+    output: ReadOutputArgs,
 }
 
 #[derive(Args, Debug)]
@@ -123,22 +137,58 @@ pub fn run() -> Result<i32> {
 
     let code = match cli.command {
         Commands::Status(args) => {
-            cmd_status(&config, args.workspace.as_deref(), !args.no_auto_launch)?
+            cmd_status(
+                &config,
+                args.workspace.as_deref(),
+                !args.no_auto_launch,
+                resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
+            )?
         }
         Commands::Models(args) => {
-            cmd_models(&config, args.workspace.as_deref(), !args.no_auto_launch)?
+            cmd_models(
+                &config,
+                args.workspace.as_deref(),
+                !args.no_auto_launch,
+                resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
+            )?
         }
         Commands::Exec(args) => cmd_exec(&config, args)?,
         Commands::Resume(args) => cmd_resume(&config, args)?,
-        Commands::Runs(args) => cmd_runs(&config, args.limit)?,
-        Commands::Show(args) => cmd_show(&config, &args.run_id)?,
-        Commands::Events(args) => cmd_events(&config, &args.run_id)?,
+        Commands::Runs(args) => {
+            cmd_runs(
+                &config,
+                args.limit,
+                resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
+            )?
+        }
+        Commands::Show(args) => {
+            cmd_show(
+                &config,
+                &args.run_id,
+                resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
+            )?
+        }
+        Commands::Events(args) => {
+            cmd_events(
+                &config,
+                &args.run_id,
+                resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
+            )?
+        }
         Commands::Settings(args) => cmd_settings(&config, args.command)?,
     };
     Ok(code)
 }
 
-fn cmd_status(config: &AppConfig, workspace: Option<&str>, auto_launch: bool) -> Result<i32> {
+fn cmd_status(
+    config: &AppConfig,
+    workspace: Option<&str>,
+    auto_launch: bool,
+    output_mode: OutputMode,
+) -> Result<i32> {
+    if !matches!(output_mode, OutputMode::Json) {
+        return Ok(print_unsupported_output_mode("status", output_mode, &["json"]));
+    }
     match runtime_diagnostics(config, workspace, auto_launch) {
         Ok(body) => {
             print_json(&json!({ "ok": true, "status": body }));
@@ -151,11 +201,30 @@ fn cmd_status(config: &AppConfig, workspace: Option<&str>, auto_launch: bool) ->
     }
 }
 
-fn cmd_models(config: &AppConfig, workspace: Option<&str>, auto_launch: bool) -> Result<i32> {
+fn cmd_models(
+    config: &AppConfig,
+    workspace: Option<&str>,
+    auto_launch: bool,
+    output_mode: OutputMode,
+) -> Result<i32> {
     match runtime_diagnostics(config, workspace, auto_launch) {
         Ok(body) => {
             let models = body.get("models").cloned().unwrap_or_else(|| json!([]));
-            print_json(&json!({ "ok": true, "models": models }));
+            match output_mode {
+                OutputMode::Json => print_json(&json!({ "ok": true, "models": models })),
+                OutputMode::Text => {
+                    let parsed: Vec<ModelInfo> =
+                        serde_json::from_value(models).unwrap_or_default();
+                    print_models_text(&parsed);
+                }
+                OutputMode::StreamJson => {
+                    return Ok(print_unsupported_output_mode(
+                        "models",
+                        output_mode,
+                        &["json", "text"],
+                    ));
+                }
+            }
             Ok(0)
         }
         Err(err) => {
@@ -234,13 +303,19 @@ fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
     Ok(if ok { 0 } else { 1 })
 }
 
-fn cmd_runs(config: &AppConfig, limit: usize) -> Result<i32> {
+fn cmd_runs(config: &AppConfig, limit: usize, output_mode: OutputMode) -> Result<i32> {
+    if !matches!(output_mode, OutputMode::Json) {
+        return Ok(print_unsupported_output_mode("runs", output_mode, &["json"]));
+    }
     let runs = list_agent_runs(config, limit)?;
     print_json(&json!({ "ok": true, "runs": runs }));
     Ok(0)
 }
 
-fn cmd_show(config: &AppConfig, run_id: &str) -> Result<i32> {
+fn cmd_show(config: &AppConfig, run_id: &str, output_mode: OutputMode) -> Result<i32> {
+    if !matches!(output_mode, OutputMode::Json) {
+        return Ok(print_unsupported_output_mode("show", output_mode, &["json"]));
+    }
     if let Some(run) = get_agent_run(config, run_id)? {
         print_json(&json!({ "ok": true, "run": run }));
         Ok(0)
@@ -250,7 +325,10 @@ fn cmd_show(config: &AppConfig, run_id: &str) -> Result<i32> {
     }
 }
 
-fn cmd_events(config: &AppConfig, run_id: &str) -> Result<i32> {
+fn cmd_events(config: &AppConfig, run_id: &str, output_mode: OutputMode) -> Result<i32> {
+    if !matches!(output_mode, OutputMode::Json) {
+        return Ok(print_unsupported_output_mode("events", output_mode, &["json"]));
+    }
     if let Some(events) = get_agent_events(config, run_id)? {
         print_json(&json!({ "ok": true, "runId": run_id, "events": events }));
         Ok(0)
@@ -361,6 +439,16 @@ fn resolve_output_mode(config: &AppConfig, output: Option<&str>, as_json: bool) 
     }
 }
 
+fn resolve_query_output_mode(output: Option<&str>, as_json: bool) -> OutputMode {
+    if as_json {
+        OutputMode::Json
+    } else if let Some(output) = output {
+        OutputMode::parse(Some(output))
+    } else {
+        OutputMode::Json
+    }
+}
+
 fn print_run_result(
     run: &crate::types::RunRecord,
     output_mode: OutputMode,
@@ -437,6 +525,36 @@ fn print_json(value: &serde_json::Value) {
     );
 }
 
+fn print_models_text(models: &[ModelInfo]) {
+    let width = models.iter().map(|model| model.id.len()).max().unwrap_or(0);
+    for model in models {
+        println!(
+            "{:<width$}  {}",
+            model.id,
+            model.label.as_deref().unwrap_or(model.id.as_str()),
+            width = width,
+        );
+    }
+}
+
+fn print_unsupported_output_mode(
+    command: &str,
+    output_mode: OutputMode,
+    supported: &[&str],
+) -> i32 {
+    print_json(&json!({
+        "ok": false,
+        "command": command,
+        "error": format!(
+            "unsupported output mode '{}' for command '{}'",
+            output_mode.as_str(),
+            command
+        ),
+        "supportedOutputs": supported,
+    }));
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +572,13 @@ mod tests {
         // When --json flag is passed, it should override everything
         let json_mode = OutputMode::Json;
         assert_eq!(json_mode, OutputMode::Json);
+    }
+
+    #[test]
+    fn test_resolve_query_output_mode_defaults_to_json() {
+        assert_eq!(resolve_query_output_mode(None, false), OutputMode::Json);
+        assert_eq!(resolve_query_output_mode(Some("json"), false), OutputMode::Json);
+        assert_eq!(resolve_query_output_mode(Some("text"), false), OutputMode::Text);
     }
 
     #[test]
@@ -490,7 +615,7 @@ mod tests {
             prompt_option: Some("from option".to_string()),
             files: vec!["file1.txt".to_string(), "file2.txt".to_string()],
             workspace: Some("/workspace".to_string()),
-            model: Some("gpt-4".to_string()),
+            model: Some("gpt-5-4".to_string()),
             output: Some("json".to_string()),
             json: true,
             quiet: true,
@@ -498,7 +623,7 @@ mod tests {
             no_auto_launch: true,
         };
         assert_eq!(args.workspace, Some("/workspace".to_string()));
-        assert_eq!(args.model, Some("gpt-4".to_string()));
+        assert_eq!(args.model, Some("gpt-5-4".to_string()));
         assert!(args.json);
         assert!(args.quiet);
         assert!(args.no_persist); // explicitly disabled
@@ -526,14 +651,26 @@ mod tests {
     #[test]
     fn test_runs_args_default_limit() {
         // Default limit is 20
-        let args = RunsArgs { limit: 20 };
+        let args = RunsArgs {
+            limit: 20,
+            output: ReadOutputArgs::default(),
+        };
         assert_eq!(args.limit, 20);
     }
 
     #[test]
     fn test_runs_args_custom_limit() {
-        let args = RunsArgs { limit: 100 };
+        let args = RunsArgs {
+            limit: 100,
+            output: ReadOutputArgs::default(),
+        };
         assert_eq!(args.limit, 100);
+    }
+
+    #[test]
+    fn test_print_unsupported_output_mode_payload() {
+        let code = print_unsupported_output_mode("status", OutputMode::Text, &["json"]);
+        assert_eq!(code, 1);
     }
 
     #[test]
@@ -541,12 +678,12 @@ mod tests {
         // Verify SettingsCommand variants exist and work
         let show_cmd = SettingsCommand::Show;
         let get_cmd = SettingsCommand::Get { key: "model".to_string() };
-        let set_cmd = SettingsCommand::Set { 
-            key: "model".to_string(), 
-            value: "swe-1-6".to_string() 
+        let set_cmd = SettingsCommand::Set {
+            key: "model".to_string(),
+            value: "swe-1-6".to_string(),
         };
         let unset_cmd = SettingsCommand::Unset { key: "model".to_string() };
-        
+
         // Just verify they compile and can be matched
         match show_cmd {
             SettingsCommand::Show => (),
@@ -575,7 +712,7 @@ mod tests {
         let long_text = "a".repeat(300);
         let truncated: String = long_text.chars().take(200).collect();
         assert_eq!(truncated.len(), 200);
-        
+
         let short_text = "hello";
         let truncated: String = short_text.chars().take(200).collect();
         assert_eq!(truncated, "hello");

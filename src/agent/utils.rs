@@ -3,6 +3,8 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::models::resolve_requested_model_uid as resolve_shared_model_uid;
+
 /// Generate a new unique run ID
 pub fn new_run_id() -> String {
     format!("surf-run-{}", &Uuid::new_v4().simple().to_string()[..12])
@@ -10,12 +12,7 @@ pub fn new_run_id() -> String {
 
 /// Get requested model UID with fallback
 pub fn requested_model_uid(model: Option<&str>, fallback: Option<&str>) -> String {
-    model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
-        .unwrap_or("swe-1-6")
-        .to_string()
+    resolve_shared_model_uid(model, fallback)
 }
 
 /// Build status label from HTTP status and content

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::models::{public_model_catalog, resolve_requested_model_uid_value};
 use crate::settings::{expand_path, load_settings, resolve_paths, SettingsData, SettingsPaths};
 use crate::types::{ModelInfo, OutputMode};
 
@@ -137,8 +138,11 @@ impl AppConfig {
     }
 
     pub fn default_model_uid(&self) -> String {
-        env_string(&["SURFWIND_MODEL_UID", "WINDSURF_MODEL_UID"])
-            .unwrap_or_else(|| self.settings.model.clone())
+        resolve_requested_model_uid_value(
+            env_string(&["SURFWIND_MODEL_UID", "WINDSURF_MODEL_UID"])
+                .unwrap_or_else(|| self.settings.model.clone())
+                .as_str(),
+        )
     }
 
     pub fn default_output(&self) -> OutputMode {
@@ -156,13 +160,7 @@ impl AppConfig {
     }
 
     pub fn default_models(&self) -> Vec<ModelInfo> {
-        vec![ModelInfo {
-            id: self.default_model_uid(),
-            object: "model".to_string(),
-            owned_by: "windsurf-local".to_string(),
-            label: None,
-            provider: None,
-        }]
+        public_model_catalog()
     }
 }
 
@@ -210,6 +208,13 @@ mod tests {
     }
 
     #[test]
+    fn test_default_model_uid_resolves_public_alias() {
+        let mut config = create_test_config();
+        config.settings.model = "gpt-5-4".to_string();
+        assert_eq!(config.default_model_uid(), "gpt-5-4-high");
+    }
+
+    #[test]
     fn test_default_output() {
         let config = create_test_config();
         assert_eq!(config.default_output(), OutputMode::Json);
@@ -226,9 +231,11 @@ mod tests {
     fn test_default_models() {
         let config = create_test_config();
         let models = config.default_models();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "test-model");
-        assert_eq!(models[0].owned_by, "windsurf-local");
+        assert_eq!(models.len(), 7);
+        assert_eq!(models[0].id, "swe-1-6");
+        assert_eq!(models[0].owned_by, "surfwind");
+        assert_eq!(models[5].id, "gpt-5-4");
+        assert_eq!(models[6].id, "gpt-5-3-codex");
     }
 
     #[test]
