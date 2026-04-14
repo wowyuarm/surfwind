@@ -1,30 +1,16 @@
-use anyhow::Result;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use super::poll::reconcile_and_store_run;
 use crate::config::AppConfig;
-use crate::runstore::{get_run, list_runs, save_run, summarize_run};
+use crate::runstore::{get_run, save_run};
 use crate::runtime::{
     choose_active_port, discover_runtime, now_iso, resolve_workspace_root, rpc_call,
     sample_outbound_targets,
 };
 use crate::translator::{build_metadata, extract_assistant_text, extract_error_short};
-use crate::types::{AgentRunResult, RunListItem, RunRecord, ToolCallEnvelope, ToolFunction};
-
-static TOOL_CALL_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"<windsurf_tool_call>\s*(.*?)\s*</windsurf_tool_call>")
-        .expect("valid tool-call regex")
-});
-
-#[derive(Clone, Debug)]
-struct ParsedToolCall {
-    id: String,
-    name: String,
-    arguments_json: String,
-}
+use crate::types::{AgentRunResult, RunRecord};
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentRunOptions {
@@ -170,242 +156,7 @@ pub fn resume_agent_prompt(
     )
 }
 
-pub fn list_agent_runs(config: &AppConfig, limit: usize) -> Result<Vec<RunListItem>> {
-    Ok(list_runs(config, limit)?
-        .into_iter()
-        .map(|record| reconcile_and_store_run(config, record))
-        .map(|record| summarize_run(&record))
-        .collect())
-}
-
-pub fn get_agent_run(config: &AppConfig, run_id: &str) -> Result<Option<RunRecord>> {
-    Ok(get_run(config, run_id)?.map(|record| reconcile_and_store_run(config, record)))
-}
-
-pub fn get_agent_events(config: &AppConfig, run_id: &str) -> Result<Option<Vec<Value>>> {
-    let Some(record) = get_run(config, run_id)? else {
-        return Ok(None);
-    };
-    Ok(Some(reconcile_and_store_run(config, record).events))
-}
-
-fn reconcile_and_store_run(config: &AppConfig, record: RunRecord) -> RunRecord {
-    let refreshed = refresh_run_record(config, &record).unwrap_or_else(|_| record.clone());
-    if refreshed.status != record.status
-        || refreshed.upstream_status != record.upstream_status
-        || refreshed.error != record.error
-        || refreshed.output_text != record.output_text
-        || refreshed.step_count != record.step_count
-        || refreshed.events != record.events
-    {
-        let _ = save_run(config, &refreshed);
-    }
-    refreshed
-}
-
-fn refresh_run_record(config: &AppConfig, record: &RunRecord) -> Result<RunRecord> {
-    if record.status != "running" {
-        return Ok(record.clone());
-    }
-    let Some(cascade_id) = record.cascade_id.as_deref() else {
-        return Ok(record.clone());
-    };
-    let requested_workspace = record
-        .summary
-        .get("requestedWorkspace")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let runtime = match discover_runtime(config, requested_workspace.as_deref(), false) {
-        Ok(runtime) => runtime,
-        Err(_) => return Ok(record.clone()),
-    };
-    let session_id = format!("surfwind-refresh-{}", Uuid::new_v4());
-    let metadata = build_metadata(config, &runtime.api_key, &session_id);
-    let Some(active_port) = choose_active_port(config, &runtime.ports, &runtime.csrf, &metadata)
-    else {
-        return Ok(record.clone());
-    };
-    let mut latest_steps = Vec::new();
-    let mut assistant_text = None;
-    let mut error_short = None;
-    let mut final_status = None;
-
-    let trajectory_res = rpc_call(
-        config,
-        active_port,
-        &runtime.csrf,
-        "GetCascadeTrajectory",
-        &json!({ "cascadeId": cascade_id }),
-    );
-    if trajectory_res.status == 200 {
-        let payload = safe_json_object(&trajectory_res.text);
-        final_status = payload
-            .get("status")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        latest_steps = slice_steps(
-            payload
-                .get("trajectory")
-                .and_then(|value| value.get("steps"))
-                .and_then(Value::as_array),
-            record.step_offset,
-        );
-        assistant_text =
-            prefer_assistant_text(assistant_text, extract_assistant_text(&latest_steps));
-        error_short = error_short.or_else(|| extract_error_short(&latest_steps));
-    }
-
-    let settled = settle_terminal_status(
-        config,
-        active_port,
-        &runtime.csrf,
-        cascade_id,
-        assistant_text,
-        error_short,
-        final_status,
-        record.step_offset,
-    );
-    let mut assistant_text = settled.0;
-    let mut error_short = settled.1;
-    let final_status = settled.2;
-
-    let final_steps = rpc_call(
-        config,
-        active_port,
-        &runtime.csrf,
-        "GetCascadeTrajectorySteps",
-        &json!({ "cascadeId": cascade_id, "stepOffset": record.step_offset }),
-    );
-    if final_steps.status == 200 {
-        let payload = safe_json_object(&final_steps.text);
-        latest_steps = payload
-            .get("steps")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        assistant_text =
-            prefer_assistant_text(assistant_text, extract_assistant_text(&latest_steps));
-        error_short = error_short.or_else(|| extract_error_short(&latest_steps));
-    }
-
-    if let Some(workspace_root) = requested_workspace.as_deref() {
-        if let Some(escaped_path) = detect_workspace_escape(&latest_steps, workspace_root) {
-            error_short = Some(format!("workspace_fence_violation: {}", escaped_path));
-        }
-    }
-
-    let completion_status = derive_completion_status(
-        assistant_text.as_deref(),
-        error_short.as_deref(),
-        final_status.as_deref(),
-    );
-    let parsed_tool_calls = parse_tool_calls(assistant_text.as_deref().unwrap_or_default());
-    let mut tool_calls = parsed_tool_calls
-        .iter()
-        .map(|call| ToolCallEnvelope {
-            id: call.id.clone(),
-            kind: "function".to_string(),
-            function: ToolFunction {
-                name: call.name.clone(),
-                arguments: call.arguments_json.clone(),
-            },
-        })
-        .collect::<Vec<_>>();
-    if !tool_calls.is_empty() {
-        assistant_text = strip_tool_call_envelopes(assistant_text.as_deref().unwrap_or_default());
-    }
-
-    let mut summary = record.summary.clone();
-    summary["stage"] = json!("refresh_trajectory");
-    summary["activePort"] = json!(active_port);
-    summary["runtimePid"] = json!(runtime.pid);
-    summary["candidatePorts"] = json!(runtime.ports.clone());
-    summary["workspaceId"] = json!(runtime.workspace_id.clone());
-    summary["upstreamStatus"] = json!(final_status.clone());
-    summary["finalStatus"] = json!(completion_status.clone());
-    summary["error"] = json!(error_short.clone());
-    summary["outboundTargetsEnd"] = json!(sample_outbound_targets(runtime.pid));
-    if let Some(text) = assistant_text.as_ref() {
-        summary["assistantTextLength"] = json!(text.len());
-    }
-    if !tool_calls.is_empty() {
-        summary["toolCallCount"] = json!(tool_calls.len());
-    }
-    if let Some(workspace_root) = requested_workspace.as_deref() {
-        summary["workspaceFenceRoot"] = json!(workspace_root);
-        if let Some(error) = error_short
-            .as_ref()
-            .filter(|value| value.starts_with("workspace_fence_violation:"))
-        {
-            summary["workspaceFenceViolation"] = json!(error);
-        }
-    }
-
-    let mut events = strip_dynamic_events(&record.events);
-    events.extend(build_step_events(&latest_steps, record.step_offset));
-    if let Some(text) = assistant_text.as_ref() {
-        events.push(event(
-            "assistant.output",
-            json!({ "chars": text.len(), "preview": truncate(text, 500) }),
-        ));
-    }
-    if !tool_calls.is_empty() {
-        events.push(event("tool.calls", json!({ "count": tool_calls.len() })));
-    }
-    if let Some(error) = error_short.as_ref() {
-        events.push(event(
-            "run.failed",
-            json!({ "error": error, "finalStatus": completion_status }),
-        ));
-    } else if is_running_status(final_status.as_deref()) {
-        events.push(event(
-            "run.running",
-            json!({
-                "finalStatus": completion_status,
-                "outputChars": assistant_text.as_ref().map(|text| text.len()).unwrap_or(0),
-            }),
-        ));
-    } else {
-        events.push(event(
-            "run.completed",
-            json!({
-                "finalStatus": completion_status,
-                "outputChars": assistant_text.as_ref().map(|text| text.len()).unwrap_or(0),
-            }),
-        ));
-    }
-
-    let status_code = if error_short.is_some() {
-        502
-    } else if is_running_status(final_status.as_deref()) {
-        202
-    } else {
-        200
-    };
-
-    Ok(build_run_record(
-        &record.run_id,
-        &record.mode,
-        &record.path,
-        &record.prompt,
-        record.request_model.as_deref(),
-        &record.requested_model_uid,
-        record.cascade_id.as_deref(),
-        record.parent_run_id.clone(),
-        status_code,
-        assistant_text,
-        std::mem::take(&mut tool_calls),
-        error_short,
-        Some(completion_status),
-        summary,
-        events,
-        record.step_offset,
-        latest_steps.len(),
-        &record.created_at,
-    ))
-}
-
-fn execute_run(
+pub fn execute_run(
     config: &AppConfig,
     prompt: &str,
     model: Option<&str>,
@@ -978,20 +729,10 @@ fn execute_run(
     summary["finalStatus"] = json!(completion_status.clone());
     summary["error"] = json!(error_short.clone());
 
-    let parsed_tool_calls = parse_tool_calls(assistant_text.as_deref().unwrap_or_default());
-    let mut tool_calls = parsed_tool_calls
-        .iter()
-        .map(|call| ToolCallEnvelope {
-            id: call.id.clone(),
-            kind: "function".to_string(),
-            function: ToolFunction {
-                name: call.name.clone(),
-                arguments: call.arguments_json.clone(),
-            },
-        })
-        .collect::<Vec<_>>();
+    // Extract tool calls from trajectory steps (structured format)
+    let mut tool_calls = extract_tool_calls_from_steps(&latest_steps);
+
     if !tool_calls.is_empty() {
-        assistant_text = strip_tool_call_envelopes(assistant_text.as_deref().unwrap_or_default());
         summary["toolCallCount"] = json!(tool_calls.len());
     }
 
@@ -1160,7 +901,7 @@ fn build_run_record(
     parent_run_id: Option<String>,
     http_status: u16,
     output_text: Option<String>,
-    tool_calls: Vec<ToolCallEnvelope>,
+    tool_calls: Vec<crate::types::ToolCallEnvelope>,
     error_text: Option<String>,
     final_status: Option<String>,
     summary: Value,
@@ -1372,19 +1113,14 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
         let finish = step.get("finish").and_then(Value::as_object);
         let planner = step
             .get("plannerResponse")
-            .or_else(|| step.get("planner_response"))
             .and_then(Value::as_object);
         let output = finish
-            .and_then(|item| {
-                item.get("outputString")
-                    .or_else(|| item.get("output_string"))
-            })
+            .and_then(|item| item.get("outputString"))
             .and_then(Value::as_str)
             .or_else(|| {
                 planner
                     .and_then(|item| {
                         item.get("modifiedResponse")
-                            .or_else(|| item.get("modified_response"))
                             .or_else(|| item.get("response"))
                     })
                     .and_then(Value::as_str)
@@ -1394,11 +1130,10 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
         }
         let short_error = step
             .get("errorMessage")
-            .or_else(|| step.get("error_message"))
             .and_then(Value::as_object)
             .and_then(|value| value.get("error"))
             .and_then(Value::as_object)
-            .and_then(|value| value.get("shortError").or_else(|| value.get("short_error")))
+            .and_then(|value| value.get("shortError"))
             .and_then(Value::as_str);
         if let Some(short_error) = short_error.filter(|text| !text.trim().is_empty()) {
             data["error"] = json!(short_error.trim());
@@ -1408,61 +1143,44 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
     events
 }
 
-fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
-    let mut parsed = Vec::new();
-    for capture in TOOL_CALL_PATTERN.captures_iter(text) {
-        let raw = capture
-            .get(1)
-            .map(|value| value.as_str().trim())
-            .unwrap_or_default();
-        if raw.is_empty() {
-            continue;
-        }
-        let payload: Value = match serde_json::from_str(raw) {
-            Ok(value) => value,
-            Err(_) => continue,
+fn extract_tool_calls_from_steps(steps: &[Value]) -> Vec<crate::types::ToolCallEnvelope> {
+    use crate::types::{ToolCallEnvelope, ToolFunction};
+    
+    let mut tool_calls = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let step_type = step.get("type").and_then(Value::as_str);
+        let tool_name = match step_type {
+            Some("CORTEX_STEP_TYPE_VIEW_FILE") => "view_file",
+            Some("CORTEX_STEP_TYPE_LIST_DIRECTORY") => "list_directory",
+            Some("CORTEX_STEP_TYPE_EDIT_FILE") => "edit_file",
+            Some("CORTEX_STEP_TYPE_CREATE_FILE") => "create_file",
+            Some("CORTEX_STEP_TYPE_DELETE_FILE") => "delete_file",
+            Some("CORTEX_STEP_TYPE_SHELL") => "shell",
+            Some("CORTEX_STEP_TYPE_GREP_SEARCH") => "grep_search",
+            Some("CORTEX_STEP_TYPE_RUN_COMMAND") => "run_command",
+            _ => continue,
         };
-        let items = if let Some(items) = payload.as_array() {
-            items.clone()
-        } else if let Some(items) = payload.get("tool_calls").and_then(Value::as_array) {
-            items.clone()
+        
+        // Extract arguments from step data if available
+        let arguments = if let Some(data) = step.get("data") {
+            serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string())
         } else {
-            vec![payload]
+            serde_json::to_string(step).unwrap_or_else(|_| "{}".to_string())
         };
-        for item in items {
-            let Some(name) = item
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
-            let arguments = match item.get("arguments") {
-                Some(Value::String(text)) => {
-                    serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({ "value": text }))
-                }
-                Some(Value::Object(map)) => Value::Object(map.clone()),
-                _ => json!({}),
-            };
-            parsed.push(ParsedToolCall {
-                id: format!("call_{}", &Uuid::new_v4().simple().to_string()[..24]),
-                name: name.to_string(),
-                arguments_json: serde_json::to_string(&arguments)
-                    .unwrap_or_else(|_| "{}".to_string()),
-            });
-        }
+        
+        let uuid_str = Uuid::new_v4().simple().to_string();
+        let uuid_short = &uuid_str[..8.min(uuid_str.len())];
+        
+        tool_calls.push(ToolCallEnvelope {
+            id: format!("call_{}_{}", index, uuid_short),
+            kind: "function".to_string(),
+            function: ToolFunction {
+                name: tool_name.to_string(),
+                arguments,
+            },
+        });
     }
-    parsed
-}
-
-fn strip_tool_call_envelopes(text: &str) -> Option<String> {
-    let cleaned = TOOL_CALL_PATTERN.replace_all(text, "");
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    tool_calls
 }
 
 fn inject_workspace_fence(prompt: &str, workspace_root: Option<&str>) -> String {
@@ -1472,28 +1190,6 @@ fn inject_workspace_fence(prompt: &str, workspace_root: Option<&str>) -> String 
     format!(
         "{prompt}\n\n<workspace_fence>\nOnly inspect files under this workspace root: {workspace_root}\nUse absolute paths rooted at this workspace whenever you call file tools.\nDo not browse parent directories, sibling projects, or unrelated workspaces.\nIf the task seems ambiguous, ask for clarification instead of leaving this workspace.\n</workspace_fence>"
     )
-}
-
-fn strip_dynamic_events(events: &[Value]) -> Vec<Value> {
-    events
-        .iter()
-        .filter(|event| {
-            let event_type = event
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            !matches!(
-                event_type,
-                "trajectory.step"
-                    | "assistant.output"
-                    | "tool.calls"
-                    | "run.failed"
-                    | "run.running"
-                    | "run.completed"
-            )
-        })
-        .cloned()
-        .collect()
 }
 
 fn detect_workspace_escape(steps: &[Value], workspace_root: &str) -> Option<String> {
@@ -1533,7 +1229,6 @@ fn extract_step_paths(step: &Value) -> Vec<PathBuf> {
     }
     if let Some(error_message) = step
         .get("errorMessage")
-        .or_else(|| step.get("error_message"))
         .and_then(Value::as_object)
         .and_then(|value| value.get("error"))
         .and_then(Value::as_object)
@@ -1594,4 +1289,292 @@ fn normalize_step_path(raw: &str) -> Option<PathBuf> {
         return path.canonicalize().ok().or(Some(path));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_tool_calls_from_steps() {
+        let steps = vec![
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE"}),
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE"}),
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_LIST_DIRECTORY"}),
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_FINISH"}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "view_file");
+        assert_eq!(calls[1].function.name, "list_directory");
+    }
+
+    #[test]
+    fn test_extract_tool_calls_from_steps_empty() {
+        let steps: Vec<serde_json::Value> = vec![];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tool_calls_from_steps_non_tool_steps() {
+        let steps = vec![
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE"}),
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_FINISH"}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_inject_workspace_fence() {
+        let prompt = "Help me with code";
+        let result = inject_workspace_fence(prompt, Some("/home/user/project"));
+        assert!(result.contains("Help me with code"));
+        assert!(result.contains("<workspace_fence>"));
+        assert!(result.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn test_inject_workspace_fence_no_workspace() {
+        let prompt = "Help me";
+        let result = inject_workspace_fence(prompt, None);
+        assert_eq!(result, "Help me".to_string());
+    }
+
+    #[test]
+    fn test_requested_model_uid_with_value() {
+        assert_eq!(requested_model_uid(Some("gpt-4"), Some("default")), "gpt-4");
+    }
+
+    #[test]
+    fn test_requested_model_uid_with_empty() {
+        assert_eq!(requested_model_uid(Some(""), Some("default")), "default");
+    }
+
+    #[test]
+    fn test_requested_model_uid_with_none() {
+        assert_eq!(requested_model_uid(None, Some("default")), "default");
+    }
+
+    #[test]
+    fn test_requested_model_uid_no_fallback() {
+        assert_eq!(requested_model_uid(None, None), "swe-1-6");
+    }
+
+    #[test]
+    fn test_new_run_id_format() {
+        let id = new_run_id();
+        assert!(id.starts_with("surf-run-"));
+        assert_eq!(id.len(), 21); // "surf-run-" (9) + 12 chars from uuid
+    }
+
+    #[test]
+    fn test_status_label_202() {
+        assert_eq!(status_label(202, Some("text"), None), "running");
+    }
+
+    #[test]
+    fn test_status_label_200_with_output() {
+        assert_eq!(status_label(200, Some("output"), None), "completed");
+    }
+
+    #[test]
+    fn test_status_label_200_no_output() {
+        assert_eq!(status_label(200, None, Some("error")), "failed");
+    }
+
+    #[test]
+    fn test_status_label_error_status() {
+        assert_eq!(status_label(500, None, Some("error")), "failed");
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hello");
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_is_terminal_status() {
+        assert!(!is_terminal_status(None));
+        assert!(!is_terminal_status(Some("")));
+        assert!(!is_terminal_status(Some("CASCADE_RUN_STATUS_RUNNING")));
+        assert!(is_terminal_status(Some("CASCADE_RUN_STATUS_COMPLETED")));
+    }
+
+    #[test]
+    fn test_is_running_status() {
+        assert!(!is_running_status(None));
+        assert!(!is_running_status(Some("completed")));
+        assert!(is_running_status(Some("CASCADE_RUN_STATUS_RUNNING")));
+    }
+
+    #[test]
+    fn test_truncate_long_run_id() {
+        let long_id = "a".repeat(100);
+        assert_eq!(truncate(&long_id, 32).len(), 32);
+    }
+
+    #[test]
+    fn test_safe_json_object_valid() {
+        let json = r#"{"key": "value"}"#;
+        let result = safe_json_object(json);
+        assert!(result.is_object());
+        assert_eq!(result["key"], "value");
+    }
+
+    #[test]
+    fn test_safe_json_object_invalid() {
+        let json = "not valid json";
+        let result = safe_json_object(json);
+        assert!(result.is_object());
+        assert!(result.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_safe_json_object_not_object() {
+        let json = "123";
+        let result = safe_json_object(json);
+        assert!(result.is_object());
+        assert!(result.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_slice_steps() {
+        let steps = vec![json!("step1"), json!("step2"), json!("step3")];
+        let result = slice_steps(Some(&steps), 1);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "step2");
+    }
+
+    #[test]
+    fn test_slice_steps_none() {
+        let result: Vec<Value> = slice_steps(None, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_prefer_assistant_text() {
+        assert_eq!(
+            prefer_assistant_text(None, Some("new".to_string())),
+            Some("new".to_string())
+        );
+        assert_eq!(
+            prefer_assistant_text(Some("current".to_string()), None),
+            Some("current".to_string())
+        );
+        assert_eq!(
+            prefer_assistant_text(Some("current".to_string()), Some("new".to_string())),
+            Some("current".to_string())
+        );
+    }
+
+    #[test]
+    fn test_event_structure() {
+        let data = json!({"test": "data"});
+        let evt = event("test.event", data.clone());
+        assert_eq!(evt["type"], "test.event");
+        assert!(evt.get("ts").is_some());
+        assert_eq!(evt["data"], data);
+    }
+
+    #[test]
+    fn test_extract_tool_calls_all_tool_types() {
+        let steps = vec![
+            json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE", "data": {"path": "/test/file.rs"}}),
+            json!({"type": "CORTEX_STEP_TYPE_LIST_DIRECTORY", "data": {"path": "/test"}}),
+            json!({"type": "CORTEX_STEP_TYPE_EDIT_FILE", "data": {"path": "/test/file.rs", "content": "new content"}}),
+            json!({"type": "CORTEX_STEP_TYPE_CREATE_FILE", "data": {"path": "/test/new.rs"}}),
+            json!({"type": "CORTEX_STEP_TYPE_DELETE_FILE", "data": {"path": "/test/old.rs"}}),
+            json!({"type": "CORTEX_STEP_TYPE_SHELL", "data": {"command": "ls -la"}}),
+            json!({"type": "CORTEX_STEP_TYPE_GREP_SEARCH", "data": {"pattern": "test", "path": "/test"}}),
+            json!({"type": "CORTEX_STEP_TYPE_RUN_COMMAND", "data": {"command": "cargo test"}}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 8);
+        assert_eq!(calls[0].function.name, "view_file");
+        assert_eq!(calls[1].function.name, "list_directory");
+        assert_eq!(calls[2].function.name, "edit_file");
+        assert_eq!(calls[3].function.name, "create_file");
+        assert_eq!(calls[4].function.name, "delete_file");
+        assert_eq!(calls[5].function.name, "shell");
+        assert_eq!(calls[6].function.name, "grep_search");
+        assert_eq!(calls[7].function.name, "run_command");
+    }
+
+    #[test]
+    fn test_extract_tool_calls_with_data_extraction() {
+        let steps = vec![
+            json!({
+                "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+                "data": {
+                    "path": "/home/user/project/src/main.rs",
+                    "line": 42
+                }
+            }),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "view_file");
+        // Verify data is serialized into arguments
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["path"], "/home/user/project/src/main.rs");
+        assert_eq!(args["line"], 42);
+    }
+
+    #[test]
+    fn test_extract_tool_calls_without_data_field() {
+        // When no "data" field, should serialize the entire step
+        let steps = vec![
+            json!({
+                "type": "CORTEX_STEP_TYPE_SHELL",
+                "command": "echo hello",
+                "exit_code": 0
+            }),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "shell");
+        let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["type"], "CORTEX_STEP_TYPE_SHELL");
+        assert_eq!(args["command"], "echo hello");
+    }
+
+    #[test]
+    fn test_extract_tool_calls_mixed_steps() {
+        let steps = vec![
+            json!({"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE"}),
+            json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE", "data": {"path": "/a"}}),
+            json!({"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE"}),
+            json!({"type": "CORTEX_STEP_TYPE_EDIT_FILE", "data": {"path": "/b"}}),
+            json!({"type": "CORTEX_STEP_TYPE_FINISH"}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "view_file");
+        assert_eq!(calls[1].function.name, "edit_file");
+    }
+
+    #[test]
+    fn test_extract_tool_calls_id_format() {
+        let steps = vec![
+            json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE"}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls.len(), 1);
+        // ID format: call_{index}_{uuid_short}
+        assert!(calls[0].id.starts_with("call_0_"));
+        assert!(calls[0].id.len() > 10); // Should have uuid part
+    }
+
+    #[test]
+    fn test_extract_tool_calls_kind_is_function() {
+        let steps = vec![
+            json!({"type": "CORTEX_STEP_TYPE_SHELL"}),
+        ];
+        let calls = extract_tool_calls_from_steps(&steps);
+        assert_eq!(calls[0].kind, "function");
+    }
 }

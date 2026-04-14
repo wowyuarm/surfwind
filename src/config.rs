@@ -165,3 +165,77 @@ impl AppConfig {
         }]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn create_test_config() -> AppConfig {
+        AppConfig {
+            paths: SettingsPaths {
+                home_dir: PathBuf::from("/tmp"),
+                settings_path: PathBuf::from("/tmp/settings.json"),
+                runs_dir: PathBuf::from("/tmp/runs"),
+                logs_dir: PathBuf::from("/tmp/logs"),
+                managed_runtimes_path: PathBuf::from("/tmp/managed-runtimes.json"),
+            },
+            settings: SettingsData {
+                model: "test-model".to_string(),
+                run_store_dir: "/tmp/runs".to_string(),
+                output: "json".to_string(),
+            },
+            state_dir: PathBuf::from("/tmp/state"),
+            user_settings_path: PathBuf::from("/tmp/user_settings.pb"),
+            metadata_api_key: Some("test-key".to_string()),
+            rpc_timeout_sec: 20.0,
+            poll_interval_ms: 800,
+            poll_max_rounds: 45,
+            auto_launch_enabled: false,
+            auto_launch_timeout_sec: 15.0,
+            auto_launch_poll_interval_ms: 500,
+            metadata_ide_name: "test-ide".to_string(),
+            metadata_ide_version: "1.0.0".to_string(),
+            metadata_extension_name: "test-ext".to_string(),
+            metadata_extension_version: "1.0.0".to_string(),
+            metadata_locale: "en".to_string(),
+            metadata_os: "linux".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_default_model_uid() {
+        let config = create_test_config();
+        assert_eq!(config.default_model_uid(), "test-model");
+    }
+
+    #[test]
+    fn test_default_output() {
+        let config = create_test_config();
+        assert_eq!(config.default_output(), OutputMode::Json);
+    }
+
+    #[test]
+    fn test_run_store_dir() {
+        let config = create_test_config();
+        let path = config.run_store_dir();
+        assert!(path.to_string_lossy().contains("runs"));
+    }
+
+    #[test]
+    fn test_default_models() {
+        let config = create_test_config();
+        let models = config.default_models();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "test-model");
+        assert_eq!(models[0].owned_by, "windsurf-local");
+    }
+
+    #[test]
+    fn test_env_model_override() {
+        std::env::set_var("SURFWIND_MODEL_UID", "env-model");
+        let config = create_test_config();
+        assert_eq!(config.default_model_uid(), "env-model");
+        std::env::remove_var("SURFWIND_MODEL_UID");
+    }
+}
