@@ -227,7 +227,10 @@ mod tests {
             },
         ];
         let filtered = filter_public_models(&discovered);
-        let ids = filtered.into_iter().map(|model| model.id).collect::<Vec<_>>();
+        let ids = filtered
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
         assert_eq!(ids, vec!["claude-sonnet-4-6", "gpt-5-4", "gpt-5-3-codex"]);
     }
 
@@ -246,6 +249,9 @@ mod tests {
 
     #[test]
     fn test_resolve_requested_model_uid_preserves_unknown_values() {
-        assert_eq!(resolve_requested_model_uid_value("custom-raw-model"), "custom-raw-model");
+        assert_eq!(
+            resolve_requested_model_uid_value("custom-raw-model"),
+            "custom-raw-model"
+        );
     }
 }

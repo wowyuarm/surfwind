@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::models::resolve_requested_model_uid as resolve_shared_requested_model_uid;
 use super::poll::reconcile_and_store_run;
 use crate::config::AppConfig;
+use crate::models::resolve_requested_model_uid as resolve_shared_requested_model_uid;
 use crate::runstore::{get_run, save_run};
 use crate::runtime::{
     choose_active_port, discover_runtime, now_iso, resolve_workspace_root, rpc_call,
@@ -17,6 +18,7 @@ use crate::types::{AgentRunResult, RunRecord};
 pub struct AgentRunOptions {
     pub persist: bool,
     pub auto_launch: bool,
+    pub timeout_seconds: Option<u64>,
 }
 
 impl Default for AgentRunOptions {
@@ -24,6 +26,7 @@ impl Default for AgentRunOptions {
         Self {
             persist: true,
             auto_launch: true,
+            timeout_seconds: None,
         }
     }
 }
@@ -172,6 +175,7 @@ pub fn execute_run(
 ) -> AgentRunResult {
     let effective_run_id = run_id.unwrap_or_else(new_run_id);
     let created_at = now_iso();
+    let started_at = Instant::now();
     let requested_model_uid = requested_model_uid(model, Some(&config.default_model_uid()));
     let mut summary = json!({
         "runId": effective_run_id,
@@ -183,6 +187,9 @@ pub fn execute_run(
         "autoLaunchRequested": options.auto_launch,
         "autoLaunchEffective": options.auto_launch && config.auto_launch_enabled,
     });
+    if let Some(timeout_seconds) = options.timeout_seconds {
+        summary["timeoutSeconds"] = json!(timeout_seconds);
+    }
     let mut events = vec![event(
         "run.created",
         json!({
@@ -285,12 +292,39 @@ pub fn execute_run(
     if let Some(workspace_root) = requested_workspace_root.as_deref() {
         summary["workspaceFenceRoot"] = json!(workspace_root);
     }
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        existing_cascade_id.as_deref(),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        0,
+        &created_at,
+        None,
+        None,
+        &[],
+    ) {
+        return result;
+    }
     let effective_prompt = inject_workspace_fence(prompt, requested_workspace_root.as_deref());
     if effective_prompt != prompt {
         summary["effectivePromptChars"] = json!(effective_prompt.len());
     }
 
-    let runtime = match discover_runtime(config, requested_workspace_root.as_deref(), options.auto_launch) {
+    let runtime = match discover_runtime(
+        config,
+        requested_workspace_root.as_deref(),
+        options.auto_launch,
+    ) {
         Ok(runtime) => runtime,
         Err(err) => {
             let text = err.to_string();
@@ -349,6 +383,29 @@ pub fn execute_run(
             };
         }
     };
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        existing_cascade_id.as_deref(),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        0,
+        &created_at,
+        None,
+        None,
+        &[],
+    ) {
+        return result;
+    }
 
     let session_id = format!("surfwind-{}", Uuid::new_v4());
     let metadata = build_metadata(config, &runtime.api_key, &session_id);
@@ -454,6 +511,29 @@ pub fn execute_run(
             run: record,
         };
     }
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        existing_cascade_id.as_deref(),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        0,
+        &created_at,
+        None,
+        None,
+        &[],
+    ) {
+        return result;
+    }
 
     let cascade_id = match existing_cascade_id {
         Some(cascade_id) => {
@@ -550,6 +630,29 @@ pub fn execute_run(
             cascade_id
         }
     };
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        Some(cascade_id.as_str()),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        0,
+        &created_at,
+        None,
+        None,
+        &[],
+    ) {
+        return result;
+    }
 
     summary["cascadeId"] = json!(cascade_id.clone());
     summary["stage"] = json!("send_message");
@@ -608,6 +711,29 @@ pub fn execute_run(
         "message.sent",
         json!({ "cascadeId": cascade_id, "promptChars": effective_prompt.len() }),
     ));
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        Some(cascade_id.as_str()),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        0,
+        &created_at,
+        None,
+        None,
+        &[],
+    ) {
+        return result;
+    }
 
     let mut assistant_text: Option<String> = None;
     let mut error_short: Option<String> = None;
@@ -617,6 +743,29 @@ pub fn execute_run(
 
     summary["stage"] = json!("poll_trajectory");
     for _ in 0..config.poll_max_rounds {
+        if let Some(result) = timeout_result_if_needed(
+            config,
+            options,
+            started_at,
+            &effective_run_id,
+            mode,
+            path,
+            prompt,
+            model,
+            &requested_model_uid,
+            Some(cascade_id.as_str()),
+            parent_run_id.clone(),
+            &mut summary,
+            &mut events,
+            step_offset,
+            latest_steps.len(),
+            &created_at,
+            assistant_text.clone(),
+            final_status.clone(),
+            &latest_steps,
+        ) {
+            return result;
+        }
         let steps_res = rpc_call(
             config,
             active_port,
@@ -681,6 +830,29 @@ pub fn execute_run(
         }
         std::thread::sleep(std::time::Duration::from_millis(config.poll_interval_ms));
     }
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        Some(cascade_id.as_str()),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        latest_steps.len(),
+        &created_at,
+        assistant_text.clone(),
+        final_status.clone(),
+        &latest_steps,
+    ) {
+        return result;
+    }
 
     let settled = settle_terminal_status(
         config,
@@ -695,6 +867,29 @@ pub fn execute_run(
     assistant_text = settled.0;
     error_short = settled.1;
     final_status = settled.2;
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        Some(cascade_id.as_str()),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        latest_steps.len(),
+        &created_at,
+        assistant_text.clone(),
+        final_status.clone(),
+        &latest_steps,
+    ) {
+        return result;
+    }
 
     let final_steps = rpc_call(
         config,
@@ -713,6 +908,29 @@ pub fn execute_run(
         assistant_text =
             prefer_assistant_text(assistant_text, extract_assistant_text(&latest_steps));
         error_short = error_short.or_else(|| extract_error_short(&latest_steps));
+    }
+    if let Some(result) = timeout_result_if_needed(
+        config,
+        options,
+        started_at,
+        &effective_run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        &requested_model_uid,
+        Some(cascade_id.as_str()),
+        parent_run_id.clone(),
+        &mut summary,
+        &mut events,
+        step_offset,
+        latest_steps.len(),
+        &created_at,
+        assistant_text.clone(),
+        final_status.clone(),
+        &latest_steps,
+    ) {
+        return result;
     }
     if let Some(workspace_root) = requested_workspace_root.as_deref() {
         if let Some(escaped_path) = detect_workspace_escape(&latest_steps, workspace_root) {
@@ -813,26 +1031,35 @@ pub fn execute_run(
 }
 
 fn agent_run_options_payload(config: &AppConfig, options: AgentRunOptions) -> Value {
-    json!({
+    let mut payload = json!({
         "persist": options.persist,
         "autoLaunchRequested": options.auto_launch,
         "autoLaunchEffective": options.auto_launch && config.auto_launch_enabled,
-    })
+    });
+    if let Some(timeout_seconds) = options.timeout_seconds {
+        payload["timeoutSeconds"] = json!(timeout_seconds);
+    }
+    payload
 }
 
 fn apply_run_record_options(record: &mut RunRecord, config: &AppConfig, options: AgentRunOptions) {
     record.summary["persisted"] = json!(options.persist);
     record.summary["autoLaunchRequested"] = json!(options.auto_launch);
-    record.summary["autoLaunchEffective"] = json!(options.auto_launch && config.auto_launch_enabled);
+    record.summary["autoLaunchEffective"] =
+        json!(options.auto_launch && config.auto_launch_enabled);
+    if let Some(timeout_seconds) = options.timeout_seconds {
+        record.summary["timeoutSeconds"] = json!(timeout_seconds);
+    }
     if !record
         .events
         .iter()
         .any(|event| event.get("type").and_then(Value::as_str) == Some("run.options"))
     {
         let insert_at = record.events.len().min(1);
-        record
-            .events
-            .insert(insert_at, event("run.options", agent_run_options_payload(config, options)));
+        record.events.insert(
+            insert_at,
+            event("run.options", agent_run_options_payload(config, options)),
+        );
     }
 }
 
@@ -840,6 +1067,87 @@ fn store_run_if_enabled(config: &AppConfig, persist: bool, record: &RunRecord) {
     if persist {
         let _ = save_run(config, record);
     }
+}
+
+fn timeout_result_if_needed(
+    config: &AppConfig,
+    options: AgentRunOptions,
+    started_at: Instant,
+    run_id: &str,
+    mode: &str,
+    path: &str,
+    prompt: &str,
+    model: Option<&str>,
+    requested_model_uid: &str,
+    cascade_id: Option<&str>,
+    parent_run_id: Option<String>,
+    summary: &mut Value,
+    events: &mut Vec<Value>,
+    step_offset: usize,
+    new_step_count: usize,
+    created_at: &str,
+    output_text: Option<String>,
+    final_status: Option<String>,
+    latest_steps: &[Value],
+) -> Option<AgentRunResult> {
+    let Some(timeout_seconds) = options.timeout_seconds else {
+        return None;
+    };
+    if !command_timeout_reached(started_at, timeout_seconds) {
+        return None;
+    }
+
+    summary["timedOut"] = json!(true);
+    summary["error"] = json!("timeout_reached");
+    summary["timeoutSeconds"] = json!(timeout_seconds);
+    if final_status.is_some() {
+        summary["upstreamStatus"] = json!(final_status.clone());
+    }
+    events.push(event(
+        "run.timeout",
+        json!({
+            "timeoutSeconds": timeout_seconds,
+            "stepCount": step_offset + new_step_count,
+        }),
+    ));
+
+    let record = build_run_record(
+        run_id,
+        mode,
+        path,
+        prompt,
+        model,
+        requested_model_uid,
+        cascade_id,
+        parent_run_id,
+        408,
+        output_text,
+        extract_tool_calls_from_steps(latest_steps),
+        Some("timeout_reached".to_string()),
+        final_status,
+        summary.clone(),
+        events.clone(),
+        step_offset,
+        new_step_count,
+        created_at,
+    );
+    store_run_if_enabled(config, options.persist, &record);
+
+    Some(AgentRunResult {
+        status: 408,
+        body: json!({
+            "error": {
+                "message": format!("command timed out after {} seconds", timeout_seconds),
+                "code": "timeout_reached",
+            },
+            "run": record,
+        }),
+        run: record,
+    })
+}
+
+fn command_timeout_reached(started_at: Instant, timeout_seconds: u64) -> bool {
+    started_at.elapsed() >= Duration::from_secs(timeout_seconds)
 }
 
 fn requested_model_uid(model: Option<&str>, fallback: Option<&str>) -> String {
@@ -1107,9 +1415,7 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
             "stepType": step.get("type").and_then(Value::as_str).unwrap_or("unknown"),
         });
         let finish = step.get("finish").and_then(Value::as_object);
-        let planner = step
-            .get("plannerResponse")
-            .and_then(Value::as_object);
+        let planner = step.get("plannerResponse").and_then(Value::as_object);
         let output = finish
             .and_then(|item| item.get("outputString"))
             .and_then(Value::as_str)
@@ -1141,7 +1447,7 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
 
 fn extract_tool_calls_from_steps(steps: &[Value]) -> Vec<crate::types::ToolCallEnvelope> {
     use crate::types::{ToolCallEnvelope, ToolFunction};
-    
+
     let mut tool_calls = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         let step_type = step.get("type").and_then(Value::as_str);
@@ -1156,17 +1462,17 @@ fn extract_tool_calls_from_steps(steps: &[Value]) -> Vec<crate::types::ToolCallE
             Some("CORTEX_STEP_TYPE_RUN_COMMAND") => "run_command",
             _ => continue,
         };
-        
+
         // Extract arguments from step data if available
         let arguments = if let Some(data) = step.get("data") {
             serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string())
         } else {
             serde_json::to_string(step).unwrap_or_else(|_| "{}".to_string())
         };
-        
+
         let uuid_str = Uuid::new_v4().simple().to_string();
         let uuid_short = &uuid_str[..8.min(uuid_str.len())];
-        
+
         tool_calls.push(ToolCallEnvelope {
             id: format!("call_{}_{}", index, uuid_short),
             kind: "function".to_string(),
@@ -1292,10 +1598,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_agent_run_options_default_timeout_disabled() {
+        let options = AgentRunOptions::default();
+        assert_eq!(options.timeout_seconds, None);
+    }
+
+    #[test]
     fn test_extract_tool_calls_from_steps() {
         let steps = vec![
             serde_json::json!({"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE"}),
-            serde_json::json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE"}),
+            serde_json::json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE", "data": {"path": "/tmp/test.txt"}}),
             serde_json::json!({"type": "CORTEX_STEP_TYPE_LIST_DIRECTORY"}),
             serde_json::json!({"type": "CORTEX_STEP_TYPE_FINISH"}),
         ];
@@ -1408,6 +1720,13 @@ mod tests {
     }
 
     #[test]
+    fn test_command_timeout_reached() {
+        let started_at = Instant::now() - Duration::from_secs(2);
+        assert!(command_timeout_reached(started_at, 1));
+        assert!(!command_timeout_reached(Instant::now(), 10));
+    }
+
+    #[test]
     fn test_truncate_long_run_id() {
         let long_id = "a".repeat(100);
         assert_eq!(truncate(&long_id, 32).len(), 32);
@@ -1502,15 +1821,13 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_with_data_extraction() {
-        let steps = vec![
-            json!({
-                "type": "CORTEX_STEP_TYPE_VIEW_FILE",
-                "data": {
-                    "path": "/home/user/project/src/main.rs",
-                    "line": 42
-                }
-            }),
-        ];
+        let steps = vec![json!({
+            "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+            "data": {
+                "path": "/home/user/project/src/main.rs",
+                "line": 42
+            }
+        })];
         let calls = extract_tool_calls_from_steps(&steps);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "view_file");
@@ -1523,13 +1840,11 @@ mod tests {
     #[test]
     fn test_extract_tool_calls_without_data_field() {
         // When no "data" field, should serialize the entire step
-        let steps = vec![
-            json!({
-                "type": "CORTEX_STEP_TYPE_SHELL",
-                "command": "echo hello",
-                "exit_code": 0
-            }),
-        ];
+        let steps = vec![json!({
+            "type": "CORTEX_STEP_TYPE_SHELL",
+            "command": "echo hello",
+            "exit_code": 0
+        })];
         let calls = extract_tool_calls_from_steps(&steps);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "shell");
@@ -1555,9 +1870,7 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_id_format() {
-        let steps = vec![
-            json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE"}),
-        ];
+        let steps = vec![json!({"type": "CORTEX_STEP_TYPE_VIEW_FILE"})];
         let calls = extract_tool_calls_from_steps(&steps);
         assert_eq!(calls.len(), 1);
         // ID format: call_{index}_{uuid_short}
@@ -1567,9 +1880,7 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_kind_is_function() {
-        let steps = vec![
-            json!({"type": "CORTEX_STEP_TYPE_SHELL"}),
-        ];
+        let steps = vec![json!({"type": "CORTEX_STEP_TYPE_SHELL"})];
         let calls = extract_tool_calls_from_steps(&steps);
         assert_eq!(calls[0].kind, "function");
     }

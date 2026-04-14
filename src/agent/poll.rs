@@ -508,9 +508,7 @@ fn build_step_events(steps: &[Value], step_offset: usize) -> Vec<Value> {
             "stepType": step.get("type").and_then(Value::as_str).unwrap_or("unknown"),
         });
         let finish = step.get("finish").and_then(Value::as_object);
-        let planner = step
-            .get("plannerResponse")
-            .and_then(Value::as_object);
+        let planner = step.get("plannerResponse").and_then(Value::as_object);
         let output = finish
             .and_then(|item| item.get("outputString"))
             .and_then(Value::as_str)
@@ -729,13 +727,9 @@ mod tests {
         )
         .unwrap();
 
-        let runs = list_agent_runs_filtered(
-            &config,
-            20,
-            None,
-            Some(&workspace_b.to_string_lossy()),
-        )
-        .unwrap();
+        let runs =
+            list_agent_runs_filtered(&config, 20, None, Some(&workspace_b.to_string_lossy()))
+                .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "run-2");
     }

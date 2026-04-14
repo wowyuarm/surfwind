@@ -49,7 +49,10 @@ Execution flow:
 The agent-facing CLI contract should stay explicit about:
 
 - output mode selection for automation, including `stream-json`
+- strict structured output validation for final assistant results via `--strict-json` and `--output-schema`
+- explicit command-level timeout control via `--timeout-seconds`
 - minimal final-text extraction for shell callers via `--output-last-message`
+- deterministic artifact writes for callers that want files instead of stdout scraping
 - whether a call persists into the local run ledger
 - whether a command may auto-launch a headless runtime as a side effect
 - how callers target the latest persisted run and filter ledger reads without extra client-side plumbing
@@ -84,6 +87,10 @@ The current product boundary is intentionally narrow:
 - `settings`
 
 The boundary is optimized for agent/script callers first, not for human terminal UX first.
+
+For `exec` and `resume`, result-contract enforcement and artifact-output decisions are CLI-boundary responsibilities: the agent layer still captures the raw run, while the CLI decides whether the final assistant output satisfies the caller's requested JSON contract and whether deterministic result artifacts should be written before returning success.
+
+Explicit timeout control spans the agent orchestration path: `--timeout-seconds` is exposed at the CLI boundary, propagated into the agent layer, and preserved in run summaries and events when a command returns `timeout_reached`.
 
 No HTTP server is part of the current target architecture.
 

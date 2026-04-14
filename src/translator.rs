@@ -34,9 +34,7 @@ pub fn extract_assistant_text(steps: &[Value]) -> Option<String> {
 
     for step in steps {
         if step.get("type").and_then(Value::as_str) == Some("CORTEX_STEP_TYPE_PLANNER_RESPONSE") {
-            let planner = step
-                .get("plannerResponse")
-                .and_then(Value::as_object);
+            let planner = step.get("plannerResponse").and_then(Value::as_object);
             if let Some(planner) = planner {
                 for key in ["response", "modifiedResponse"] {
                     if let Some(text) = planner
@@ -70,9 +68,7 @@ pub fn extract_error_short(steps: &[Value]) -> Option<String> {
         if step.get("type").and_then(Value::as_str) != Some("CORTEX_STEP_TYPE_ERROR_MESSAGE") {
             continue;
         }
-        let error_message = step
-            .get("errorMessage")
-            .and_then(Value::as_object);
+        let error_message = step.get("errorMessage").and_then(Value::as_object);
         let inner = error_message
             .and_then(|value| value.get("error"))
             .and_then(Value::as_object);

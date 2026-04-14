@@ -2,6 +2,7 @@ pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod models;
+mod output_contract;
 pub mod runstore;
 pub mod runtime;
 pub mod settings;

@@ -16,7 +16,11 @@ pub fn requested_model_uid(model: Option<&str>, fallback: Option<&str>) -> Strin
 }
 
 /// Build status label from HTTP status and content
-pub fn status_label(http_status: u16, output_text: Option<&str>, error_text: Option<&str>) -> String {
+pub fn status_label(
+    http_status: u16,
+    output_text: Option<&str>,
+    error_text: Option<&str>,
+) -> String {
     if http_status >= 400 {
         return "failed".to_string();
     }
@@ -85,7 +89,10 @@ pub fn event(event_type: &str, data: Value, now_iso: &str) -> Value {
 /// Inject workspace fence into prompt
 pub fn inject_workspace_fence(prompt: &str, workspace_root: Option<&str>) -> String {
     match workspace_root {
-        Some(root) if !root.is_empty() && !prompt.contains(&format!("<workspace_root>{root}</workspace_root>")) => {
+        Some(root)
+            if !root.is_empty()
+                && !prompt.contains(&format!("<workspace_root>{root}</workspace_root>")) =>
+        {
             format!("<workspace_root>{root}</workspace_root>\n{prompt}")
         }
         _ => prompt.to_string(),
@@ -115,7 +122,10 @@ mod tests {
 
     #[test]
     fn test_requested_model_uid_with_fallback() {
-        assert_eq!(requested_model_uid(None, Some("fallback-model")), "fallback-model");
+        assert_eq!(
+            requested_model_uid(None, Some("fallback-model")),
+            "fallback-model"
+        );
     }
 
     #[test]
@@ -225,7 +235,10 @@ mod tests {
     #[test]
     fn test_inject_workspace_fence() {
         let result = inject_workspace_fence("prompt", Some("/workspace"));
-        assert_eq!(result, "<workspace_root>/workspace</workspace_root>\nprompt");
+        assert_eq!(
+            result,
+            "<workspace_root>/workspace</workspace_root>\nprompt"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::headless::{
     cleanup_idle_managed_runtimes, touch_managed_runtime, try_headless_auto_attach_runtime,
 };
 use super::rpc::{
-    choose_active_port, discover_models, rpc_call, sample_outbound_targets, run_ss,
+    choose_active_port, discover_models, rpc_call, run_ss, sample_outbound_targets,
     ActiveRuntimeContext,
 };
 use crate::config::AppConfig;

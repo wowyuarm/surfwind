@@ -150,8 +150,14 @@ mod tests {
 
     #[test]
     fn parses_stream_json_aliases() {
-        assert_eq!(OutputMode::parse(Some("stream-json")), OutputMode::StreamJson);
-        assert_eq!(OutputMode::parse(Some("stream_json")), OutputMode::StreamJson);
+        assert_eq!(
+            OutputMode::parse(Some("stream-json")),
+            OutputMode::StreamJson
+        );
+        assert_eq!(
+            OutputMode::parse(Some("stream_json")),
+            OutputMode::StreamJson
+        );
         assert_eq!(OutputMode::parse(Some("jsonl")), OutputMode::StreamJson);
     }
 

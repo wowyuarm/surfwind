@@ -103,7 +103,10 @@ pub fn setting_keys() -> Vec<&'static str> {
     SUPPORTED_SETTING_KEYS.to_vec()
 }
 
-pub fn describe_settings(paths: &SettingsPaths, key: Option<&str>) -> Result<Vec<SettingDescriptor>> {
+pub fn describe_settings(
+    paths: &SettingsPaths,
+    key: Option<&str>,
+) -> Result<Vec<SettingDescriptor>> {
     let defaults = default_settings(paths);
     match key {
         Some(key) => Ok(vec![setting_descriptor(key, &defaults)?]),
@@ -210,7 +213,8 @@ fn setting_descriptor(key: &str, defaults: &SettingsData) -> Result<SettingDescr
             key: "model",
             value_type: "string",
             default: defaults.model.clone(),
-            description: "Default public model alias or raw runtime model uid used when --model is omitted.",
+            description:
+                "Default public model alias or raw runtime model uid used when --model is omitted.",
             accepted_values: Vec::new(),
         },
         "runStoreDir" => SettingDescriptor {
@@ -224,7 +228,8 @@ fn setting_descriptor(key: &str, defaults: &SettingsData) -> Result<SettingDescr
             key: "output",
             value_type: "string",
             default: defaults.output.clone(),
-            description: "Default output mode for exec and resume when no explicit output flag is provided.",
+            description:
+                "Default output mode for exec and resume when no explicit output flag is provided.",
             accepted_values: vec!["text", "json", "stream-json"],
         },
         _ => unreachable!(),
@@ -261,9 +266,7 @@ fn coerce_setting_value(key: &str, value: &str) -> Result<Value> {
         "output" => match value.trim().to_ascii_lowercase().as_str() {
             "text" => Ok(Value::String("text".to_string())),
             "json" => Ok(Value::String("json".to_string())),
-            "stream-json" | "stream_json" | "jsonl" => {
-                Ok(Value::String("stream-json".to_string()))
-            }
+            "stream-json" | "stream_json" | "jsonl" => Ok(Value::String("stream-json".to_string())),
             _ => Err(anyhow!("output must be text, json, or stream-json")),
         },
         _ => Err(unknown_key_error(key)),
@@ -310,12 +313,17 @@ mod tests {
 
         assert_eq!(described.len(), 1);
         assert_eq!(described[0].key, "output");
-        assert_eq!(described[0].accepted_values, vec!["text", "json", "stream-json"]);
+        assert_eq!(
+            described[0].accepted_values,
+            vec!["text", "json", "stream-json"]
+        );
     }
 
     #[test]
     fn unknown_setting_error_lists_supported_keys() {
         let err = describe_settings(&resolve_paths(), Some("invalid")).unwrap_err();
-        assert!(err.to_string().contains("supported: model, runStoreDir, output"));
+        assert!(err
+            .to_string()
+            .contains("supported: model, runStoreDir, output"));
     }
 }

@@ -1,9 +1,9 @@
 // Test utilities shared across integration tests
 
+use serde_json::json;
 use surfwind::config::AppConfig;
 use surfwind::settings::SettingsPaths;
 use surfwind::types::RunRecord;
-use serde_json::json;
 use tempfile::TempDir;
 
 pub fn create_test_config(temp_dir: &TempDir) -> AppConfig {

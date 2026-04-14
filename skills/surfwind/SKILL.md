@@ -42,12 +42,22 @@ Use `surfwind` as an agent-first CLI bridge, not as a human-oriented terminal UX
 - Use `--json` or `--output json` when one structured object is easier for the caller to consume.
 - Use text output only when the direct assistant text is the desired artifact.
 - Use `--output-last-message` when a shell caller only needs the final assistant text instead of the full structured record.
+- Use `--output-last-message-file <path>` to write the final assistant text to a file for downstream consumers.
+- Use `--result-file <path>` to write the full structured JSON result to a file instead of relying on stdout parsing.
 
 ## Control side effects explicitly
 
 - Pass `--no-auto-launch` when the caller wants discovery only and must not bootstrap a headless runtime implicitly.
 - Pass `--no-persist` when the run is ephemeral and should not be written to the local run store.
 - Remember that `--no-persist` trades away later `resume`, `show`, and `events` inspection.
+- Pass `--timeout-seconds <int>` when the caller needs a hard deadline for the command rather than relying on internal polling limits.
+
+## Enforce strict output contracts when needed
+
+- Use `--strict-json` when the caller requires the final assistant output to be valid JSON; validation failures return `failureKind: output_contract`.
+- Use `--output-schema <path>` when the caller requires the final output to match a specific JSON Schema file; the CLI validates at the boundary before returning success.
+- Treat schema/JSON failures as contract violations (non-zero exit) rather than runtime failures, so callers can distinguish "agent produced wrong shape" from "runtime crashed".
+- Combine `--strict-json` or `--output-schema` with `--result-file` when downstream tools expect both a validated structure and a deterministic file artifact.
 
 ## Handle results as agent contracts
 
@@ -55,6 +65,10 @@ Use `surfwind` as an agent-first CLI bridge, not as a human-oriented terminal UX
 - Treat HTTP-style status `202` and normalized run status `running` as a normal long-running outcome, not as a fatal error.
 - On failure, inspect both the top-level error object and the embedded run record.
 - Read `run.summary`, `run.error`, and `run.events` before retrying blindly.
+- Recognize structured failure taxonomy:
+  - `timeout_reached`: command exceeded `--timeout-seconds` and was terminated
+  - `output_contract` with `failureKind: output_contract`: final output failed strict JSON or schema validation
+  - `output_artifact` with `failureKind: output_artifact`: artifact file could not be written
 
 ## Inspect the run ledger intentionally
 
@@ -71,6 +85,9 @@ surfwind models --no-auto-launch
 surfwind exec --workspace /repo --output stream-json --no-persist "summarize this repo"
 surfwind exec --workspace /repo --output-last-message "reply with the final answer only"
 surfwind exec --workspace /repo --json "plan the next refactor"
+surfwind exec --workspace /repo --timeout-seconds 120 --result-file ./artifacts/result.json --output-last-message-file ./artifacts/final.txt "solve within deadline"
+surfwind exec --workspace /repo --strict-json --json "reply with a single JSON object"
+surfwind exec --workspace /repo --output-schema ./result.schema.json --json "respond using the requested schema"
 surfwind resume <run-id> --output stream-json "continue"
 surfwind resume --last "continue"
 surfwind runs --status failed --workspace /repo

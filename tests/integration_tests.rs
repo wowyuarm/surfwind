@@ -1,11 +1,11 @@
 mod common;
 
-use surfwind::agent::{get_latest_agent_run, list_agent_runs_filtered};
-use surfwind::settings::{bootstrap, expand_path, load_settings, SettingsPaths};
-use surfwind::types::OutputMode;
-use surfwind::runstore::{save_run, get_run, list_runs, summarize_run};
-use surfwind::translator::{build_metadata, extract_assistant_text, extract_error_short};
 use serde_json::json;
+use surfwind::agent::{get_latest_agent_run, list_agent_runs_filtered};
+use surfwind::runstore::{get_run, list_runs, save_run, summarize_run};
+use surfwind::settings::{bootstrap, expand_path, load_settings, SettingsPaths};
+use surfwind::translator::{build_metadata, extract_assistant_text, extract_error_short};
+use surfwind::types::OutputMode;
 use tempfile::TempDir;
 
 use common::{create_test_config, create_test_run};
@@ -143,7 +143,10 @@ fn test_translator_extract_error_integration() {
 fn test_output_mode_parsing() {
     assert_eq!(OutputMode::parse(Some("text")), OutputMode::Text);
     assert_eq!(OutputMode::parse(Some("json")), OutputMode::Json);
-    assert_eq!(OutputMode::parse(Some("stream-json")), OutputMode::StreamJson);
+    assert_eq!(
+        OutputMode::parse(Some("stream-json")),
+        OutputMode::StreamJson
+    );
     assert_eq!(OutputMode::parse(Some("jsonl")), OutputMode::StreamJson);
     assert_eq!(OutputMode::parse(Some("unknown")), OutputMode::Text);
     assert_eq!(OutputMode::parse(None), OutputMode::Text);

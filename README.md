@@ -24,7 +24,11 @@ The default attach path does not use the current Windsurf UI session hook and do
 
 - `exec` and `resume` support `text`, `json`, and `stream-json` output
 - `stream-json` emits normalized `run.event` JSONL records followed by a final `run.result`
+- `exec` and `resume` support `--strict-json` and `--output-schema <path>` to validate final assistant output at the CLI boundary
+- when structured output validation succeeds, `json` and `stream-json` include the parsed final `result`; when it fails, the CLI returns a non-zero exit and `failureKind: output_contract`
+- `exec` and `resume` support `--timeout-seconds <int>` for explicit command-level timeout control; timed-out runs return `timeout_reached`
 - `exec` and `resume` support `--output-last-message` when a caller only wants the final assistant text
+- `exec` and `resume` support `--output-last-message-file <path>` and `--result-file <path>` for deterministic artifact output
 - `exec` and `resume` support `--no-persist` for ephemeral runs
 - `status`, `models`, `exec`, and `resume` support `--no-auto-launch` when the caller wants side effects to stay explicit
 - `resume --last`, `show latest`, and `events latest` let callers target the newest persisted run without pre-querying the ledger
@@ -39,6 +43,10 @@ cargo run -- status --no-auto-launch
 cargo run -- models --no-auto-launch
 cargo run -- exec --workspace /path/to/repo --output stream-json --no-persist "summarize this repository"
 cargo run -- exec --workspace /path/to/repo --output-last-message "reply with the final answer only"
+cargo run -- exec --workspace /path/to/repo --strict-json --json "reply with a single JSON object"
+cargo run -- exec --workspace /path/to/repo --output-schema ./result.schema.json --json "respond using the requested schema"
+cargo run -- exec --workspace /path/to/repo --timeout-seconds 120 --json "solve the task within two minutes"
+cargo run -- exec --workspace /path/to/repo --result-file ./artifacts/result.json --output-last-message-file ./artifacts/final.txt "produce a final answer and save artifacts"
 cargo run -- resume --last "continue"
 cargo run -- runs --status failed --workspace /path/to/repo
 cargo run -- show latest
