@@ -101,7 +101,6 @@ surfwind settings describe output
 
 - Read `README.md` for the public product positioning and supported CLI contracts.
 - Read `docs/architecture.md` when runtime bootstrap or persistence behavior matters.
-- Read `SURFWIND_REVIEW.md` only when deciding future product priorities rather than executing the current CLI.
 
 ## Avoid common mistakes
 

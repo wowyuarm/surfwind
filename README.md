@@ -63,6 +63,23 @@ cargo run -- settings describe output
 - no Python package entrypoint
 - no default reuse of UI IPC hooks for workspace switching
 
+## Installation
+
+### From source
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/surfwind.git
+cd surfwind
+
+# Build and install locally
+cargo install --path .
+
+# Or build without installing
+cargo build
+# The binary will be at target/release/surfwind
+```
+
 ## Build
 
 ```bash

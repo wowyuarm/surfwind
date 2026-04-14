@@ -15,7 +15,6 @@ explicit side effects, and no UI-coupled behavior.
 - `docs/`: architecture notes and durable design decisions.
 - `skills/`: agent skill cards used by automation workflows.
 - `README.md`: public CLI contract, examples, and non-goals.
-- `SURFWIND_REVIEW.md`: product-priority and maintenance context.
 
 ## Build & Development Commands
 ```bash
@@ -92,5 +91,4 @@ attachment, and RPC communication.
 ## Further Reading
 - `README.md`
 - `docs/architecture.md`
-- `SURFWIND_REVIEW.md`
 - `skills/surfwind/SKILL.md`

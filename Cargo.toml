@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Headless-first Rust CLI for the local Windsurf runtime"
 authors = ["yu"]
-license = "UNLICENSED"
+license = "MIT"
 
 [lib]
 name = "surfwind"
