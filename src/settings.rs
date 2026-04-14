@@ -7,6 +7,17 @@ use std::path::{Path, PathBuf};
 
 use crate::types::OutputMode;
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SettingDescriptor {
+    pub key: &'static str,
+    #[serde(rename = "valueType")]
+    pub value_type: &'static str,
+    pub default: String,
+    pub description: &'static str,
+    #[serde(rename = "acceptedValues", skip_serializing_if = "Vec::is_empty")]
+    pub accepted_values: Vec<&'static str>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettingsData {
     pub model: String,
@@ -23,6 +34,8 @@ pub struct SettingsPaths {
     pub logs_dir: PathBuf,
     pub managed_runtimes_path: PathBuf,
 }
+
+const SUPPORTED_SETTING_KEYS: &[&str] = &["model", "runStoreDir", "output"];
 
 fn env_string(keys: &[&str]) -> Option<String> {
     for key in keys {
@@ -84,6 +97,21 @@ pub fn load_settings(paths: &SettingsPaths) -> Result<SettingsData> {
     let text = fs::read_to_string(&paths.settings_path).unwrap_or_default();
     let raw: Value = serde_json::from_str(&text).unwrap_or_else(|_| Value::Object(Map::new()));
     Ok(normalize_settings(raw.as_object(), &defaults))
+}
+
+pub fn setting_keys() -> Vec<&'static str> {
+    SUPPORTED_SETTING_KEYS.to_vec()
+}
+
+pub fn describe_settings(paths: &SettingsPaths, key: Option<&str>) -> Result<Vec<SettingDescriptor>> {
+    let defaults = default_settings(paths);
+    match key {
+        Some(key) => Ok(vec![setting_descriptor(key, &defaults)?]),
+        None => setting_keys()
+            .into_iter()
+            .map(|item| setting_descriptor(item, &defaults))
+            .collect(),
+    }
 }
 
 fn normalize_settings(raw: Option<&Map<String, Value>>, defaults: &SettingsData) -> SettingsData {
@@ -175,10 +203,48 @@ pub fn expand_path(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+fn setting_descriptor(key: &str, defaults: &SettingsData) -> Result<SettingDescriptor> {
+    validate_key(key)?;
+    let descriptor = match key {
+        "model" => SettingDescriptor {
+            key: "model",
+            value_type: "string",
+            default: defaults.model.clone(),
+            description: "Default public model alias or raw runtime model uid used when --model is omitted.",
+            accepted_values: Vec::new(),
+        },
+        "runStoreDir" => SettingDescriptor {
+            key: "runStoreDir",
+            value_type: "string",
+            default: defaults.run_store_dir.clone(),
+            description: "Directory where persisted run JSON records are stored.",
+            accepted_values: Vec::new(),
+        },
+        "output" => SettingDescriptor {
+            key: "output",
+            value_type: "string",
+            default: defaults.output.clone(),
+            description: "Default output mode for exec and resume when no explicit output flag is provided.",
+            accepted_values: vec!["text", "json", "stream-json"],
+        },
+        _ => unreachable!(),
+    };
+    Ok(descriptor)
+}
+
+fn unknown_key_error(key: &str) -> anyhow::Error {
+    anyhow!(
+        "unknown setting key: {} (supported: {})",
+        key,
+        SUPPORTED_SETTING_KEYS.join(", ")
+    )
+}
+
 fn validate_key(key: &str) -> Result<()> {
-    match key {
-        "model" | "runStoreDir" | "output" => Ok(()),
-        _ => Err(anyhow!("unknown setting key: {}", key)),
+    if SUPPORTED_SETTING_KEYS.contains(&key) {
+        Ok(())
+    } else {
+        Err(unknown_key_error(key))
     }
 }
 
@@ -200,13 +266,16 @@ fn coerce_setting_value(key: &str, value: &str) -> Result<Value> {
             }
             _ => Err(anyhow!("output must be text, json, or stream-json")),
         },
-        _ => Err(anyhow!("unknown setting key: {}", key)),
+        _ => Err(unknown_key_error(key)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{coerce_setting_value, default_settings, normalize_settings, resolve_paths};
+    use super::{
+        coerce_setting_value, default_settings, describe_settings, normalize_settings,
+        resolve_paths, setting_keys,
+    };
     use serde_json::{json, Map, Value};
 
     #[test]
@@ -227,5 +296,26 @@ mod tests {
             coerce_setting_value("output", "stream_json").unwrap(),
             Value::String("stream-json".to_string())
         );
+    }
+
+    #[test]
+    fn exposes_supported_setting_keys() {
+        assert_eq!(setting_keys(), vec!["model", "runStoreDir", "output"]);
+    }
+
+    #[test]
+    fn describes_single_setting() {
+        let paths = resolve_paths();
+        let described = describe_settings(&paths, Some("output")).unwrap();
+
+        assert_eq!(described.len(), 1);
+        assert_eq!(described[0].key, "output");
+        assert_eq!(described[0].accepted_values, vec!["text", "json", "stream-json"]);
+    }
+
+    #[test]
+    fn unknown_setting_error_lists_supported_keys() {
+        let err = describe_settings(&resolve_paths(), Some("invalid")).unwrap_err();
+        assert!(err.to_string().contains("supported: model, runStoreDir, output"));
     }
 }

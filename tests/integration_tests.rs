@@ -1,5 +1,6 @@
 mod common;
 
+use surfwind::agent::{get_latest_agent_run, list_agent_runs_filtered};
 use surfwind::settings::{bootstrap, expand_path, load_settings, SettingsPaths};
 use surfwind::types::OutputMode;
 use surfwind::runstore::{save_run, get_run, list_runs, summarize_run};
@@ -146,4 +147,65 @@ fn test_output_mode_parsing() {
     assert_eq!(OutputMode::parse(Some("jsonl")), OutputMode::StreamJson);
     assert_eq!(OutputMode::parse(Some("unknown")), OutputMode::Text);
     assert_eq!(OutputMode::parse(None), OutputMode::Text);
+}
+
+#[test]
+fn test_settings_describe_and_keys() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = SettingsPaths {
+        home_dir: temp_dir.path().join(".surfwind"),
+        settings_path: temp_dir.path().join(".surfwind/settings.json"),
+        runs_dir: temp_dir.path().join(".surfwind/runs"),
+        logs_dir: temp_dir.path().join(".surfwind/logs"),
+        managed_runtimes_path: temp_dir.path().join(".surfwind/managed-runtimes.json"),
+    };
+
+    bootstrap(&paths).unwrap();
+    let keys = surfwind::settings::setting_keys();
+    let described = surfwind::settings::describe_settings(&paths, Some("output")).unwrap();
+
+    assert_eq!(keys, vec!["model", "runStoreDir", "output"]);
+    assert_eq!(described.len(), 1);
+    assert_eq!(described[0].key, "output");
+}
+
+#[test]
+fn test_latest_and_filtered_agent_runs() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = create_test_config(&temp_dir);
+    let workspace_a = temp_dir.path().join("repo-a");
+    let workspace_b = temp_dir.path().join("repo-b");
+
+    std::fs::create_dir_all(&workspace_a).unwrap();
+    std::fs::create_dir_all(&workspace_b).unwrap();
+
+    let run1 = create_test_run("run-1");
+    let mut run2 = create_test_run("run-2");
+    run2.status = "failed".to_string();
+    run2.summary = json!({
+        "requestedWorkspace": workspace_b.to_string_lossy(),
+        "workspaceId": "ws-run-2"
+    });
+    let mut run1 = run1;
+    run1.summary = json!({
+        "requestedWorkspace": workspace_a.to_string_lossy(),
+        "workspaceId": "ws-run-1"
+    });
+
+    save_run(&config, &run1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    save_run(&config, &run2).unwrap();
+
+    let latest = get_latest_agent_run(&config).unwrap().unwrap();
+    let filtered = list_agent_runs_filtered(
+        &config,
+        20,
+        Some("failed"),
+        Some(&workspace_b.to_string_lossy()),
+    )
+    .unwrap();
+
+    assert_eq!(latest.run_id, "run-2");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].run_id, "run-2");
 }

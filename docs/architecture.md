@@ -49,8 +49,10 @@ Execution flow:
 The agent-facing CLI contract should stay explicit about:
 
 - output mode selection for automation, including `stream-json`
+- minimal final-text extraction for shell callers via `--output-last-message`
 - whether a call persists into the local run ledger
 - whether a command may auto-launch a headless runtime as a side effect
+- how callers target the latest persisted run and filter ledger reads without extra client-side plumbing
 
 ## Persistence model
 
@@ -87,9 +89,7 @@ No HTTP server is part of the current target architecture.
 
 ## Immediate refactor direction
 
-The copied baseline currently keeps `runtime.rs` and `agent.rs` as large files for migration speed.
-
-The next cleanup step should split them into:
+The runtime and agent layers are now split into focused submodules:
 
 - `runtime/discovery.rs`
 - `runtime/rpc.rs`
@@ -97,5 +97,7 @@ The next cleanup step should split them into:
 - `agent/execute.rs`
 - `agent/poll.rs`
 - `agent/events.rs`
+
+The next cleanup step should keep those boundaries crisp and avoid letting `execute.rs` or `poll.rs` become new catch-all files. In particular, CLI-facing ergonomics such as latest-run resolution, ledger filtering, and settings discoverability should continue to live at the CLI/query edges rather than leaking into runtime bootstrap logic.
 
 That refactor is structural only and should not change the validated headless attach contract.

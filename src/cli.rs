@@ -5,13 +5,16 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use crate::agent::{
-    execute_agent_prompt, get_agent_events, get_agent_run, list_agent_runs, resume_agent_prompt,
-    AgentRunOptions,
+    execute_agent_prompt, get_agent_events, get_agent_run, get_latest_agent_run,
+    list_agent_runs_filtered, resume_agent_prompt, AgentRunOptions,
 };
 use crate::config::AppConfig;
 use crate::runtime::runtime_diagnostics;
-use crate::settings::{bootstrap, load_settings, read_setting, unset_setting, write_setting};
-use crate::types::{ModelInfo, OutputMode};
+use crate::settings::{
+    bootstrap, describe_settings, load_settings, read_setting, setting_keys, unset_setting,
+    write_setting,
+};
+use crate::types::{ModelInfo, OutputMode, RunRecord};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -58,13 +61,19 @@ struct StatusArgs {
 struct RunsArgs {
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    workspace: Option<String>,
     #[command(flatten)]
     output: ReadOutputArgs,
 }
 
 #[derive(Args, Debug)]
 struct RunIdArgs {
-    run_id: String,
+    run_id: Option<String>,
+    #[arg(long)]
+    latest: bool,
     #[command(flatten)]
     output: ReadOutputArgs,
 }
@@ -84,6 +93,8 @@ struct ExecArgs {
     output: Option<String>,
     #[arg(long)]
     json: bool,
+    #[arg(long, conflicts_with = "json", conflicts_with = "output")]
+    output_last_message: bool,
     #[arg(short = 'q', long)]
     quiet: bool,
     #[arg(long)]
@@ -94,7 +105,7 @@ struct ExecArgs {
 
 #[derive(Args, Debug)]
 struct ResumeArgs {
-    run_id: String,
+    run_id: Option<String>,
     prompt: Option<String>,
     #[arg(short = 'p', long = "prompt")]
     prompt_option: Option<String>,
@@ -108,8 +119,12 @@ struct ResumeArgs {
     output: Option<String>,
     #[arg(long)]
     json: bool,
+    #[arg(long, conflicts_with = "json", conflicts_with = "output")]
+    output_last_message: bool,
     #[arg(short = 'q', long)]
     quiet: bool,
+    #[arg(long)]
+    last: bool,
     #[arg(long)]
     no_persist: bool,
     #[arg(long)]
@@ -125,6 +140,8 @@ struct SettingsArgs {
 #[derive(Subcommand, Debug)]
 enum SettingsCommand {
     Show,
+    Keys,
+    Describe { key: Option<String> },
     Get { key: String },
     Set { key: String, value: String },
     Unset { key: String },
@@ -158,20 +175,24 @@ pub fn run() -> Result<i32> {
             cmd_runs(
                 &config,
                 args.limit,
+                args.status.as_deref(),
+                args.workspace.as_deref(),
                 resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
             )?
         }
         Commands::Show(args) => {
             cmd_show(
                 &config,
-                &args.run_id,
+                args.run_id.as_deref(),
+                args.latest,
                 resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
             )?
         }
         Commands::Events(args) => {
             cmd_events(
                 &config,
-                &args.run_id,
+                args.run_id.as_deref(),
+                args.latest,
                 resolve_query_output_mode(args.output.output.as_deref(), args.output.json),
             )?
         }
@@ -264,11 +285,29 @@ fn cmd_exec(config: &AppConfig, args: ExecArgs) -> Result<i32> {
     let output_mode = resolve_output_mode(config, args.output.as_deref(), args.json);
     let ok = matches!(result.status, 200 | 202);
     let error = result.body.get("error").filter(|value: &&Value| !value.is_null());
-    print_run_result(&result.run, output_mode, args.quiet, ok, error);
+    print_run_result(
+        &result.run,
+        output_mode,
+        args.output_last_message,
+        args.quiet,
+        ok,
+        error,
+    );
     Ok(if ok { 0 } else { 1 })
 }
 
 fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
+    let parent_run_id = match resolve_run_id_selector(config, args.run_id.as_deref(), args.last)? {
+        Some(run_id) => run_id,
+        None => {
+            print_json(&json!({
+                "ok": false,
+                "error": "run id is required",
+                "hint": "pass a run id, 'latest', or --last",
+            }));
+            return Ok(1);
+        }
+    };
     let prompt = match resolve_prompt(
         args.prompt.as_deref(),
         args.prompt_option.as_deref(),
@@ -290,7 +329,7 @@ fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
     };
     let result = resume_agent_prompt(
         config,
-        &args.run_id,
+        &parent_run_id,
         &prompt,
         args.model.as_deref(),
         args.workspace.as_deref(),
@@ -299,41 +338,73 @@ fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
     let output_mode = resolve_output_mode(config, args.output.as_deref(), args.json);
     let ok = matches!(result.status, 200 | 202);
     let error = result.body.get("error").filter(|value: &&Value| !value.is_null());
-    print_run_result(&result.run, output_mode, args.quiet, ok, error);
+    print_run_result(
+        &result.run,
+        output_mode,
+        args.output_last_message,
+        args.quiet,
+        ok,
+        error,
+    );
     Ok(if ok { 0 } else { 1 })
 }
 
-fn cmd_runs(config: &AppConfig, limit: usize, output_mode: OutputMode) -> Result<i32> {
+fn cmd_runs(
+    config: &AppConfig,
+    limit: usize,
+    status: Option<&str>,
+    workspace: Option<&str>,
+    output_mode: OutputMode,
+) -> Result<i32> {
     if !matches!(output_mode, OutputMode::Json) {
         return Ok(print_unsupported_output_mode("runs", output_mode, &["json"]));
     }
-    let runs = list_agent_runs(config, limit)?;
+    let runs = list_agent_runs_filtered(config, limit, status, workspace)?;
     print_json(&json!({ "ok": true, "runs": runs }));
     Ok(0)
 }
 
-fn cmd_show(config: &AppConfig, run_id: &str, output_mode: OutputMode) -> Result<i32> {
+fn cmd_show(
+    config: &AppConfig,
+    run_id: Option<&str>,
+    latest: bool,
+    output_mode: OutputMode,
+) -> Result<i32> {
     if !matches!(output_mode, OutputMode::Json) {
         return Ok(print_unsupported_output_mode("show", output_mode, &["json"]));
     }
-    if let Some(run) = get_agent_run(config, run_id)? {
+    let requested_run_id = requested_run_selector(run_id, latest);
+    if let Some(run) = resolve_target_run(config, run_id, latest)? {
         print_json(&json!({ "ok": true, "run": run }));
         Ok(0)
     } else {
-        print_json(&json!({ "ok": false, "error": "run not found", "runId": run_id }));
+        print_json(&json!({ "ok": false, "error": "run not found", "runId": requested_run_id }));
         Ok(1)
     }
 }
 
-fn cmd_events(config: &AppConfig, run_id: &str, output_mode: OutputMode) -> Result<i32> {
+fn cmd_events(
+    config: &AppConfig,
+    run_id: Option<&str>,
+    latest: bool,
+    output_mode: OutputMode,
+) -> Result<i32> {
     if !matches!(output_mode, OutputMode::Json) {
         return Ok(print_unsupported_output_mode("events", output_mode, &["json"]));
     }
-    if let Some(events) = get_agent_events(config, run_id)? {
-        print_json(&json!({ "ok": true, "runId": run_id, "events": events }));
+    let requested_run_id = requested_run_selector(run_id, latest);
+    let resolved_run_id = match resolve_run_id_selector(config, run_id, latest)? {
+        Some(run_id) => run_id,
+        None => {
+            print_json(&json!({ "ok": false, "error": "run not found", "runId": requested_run_id }));
+            return Ok(1);
+        }
+    };
+    if let Some(events) = get_agent_events(config, &resolved_run_id)? {
+        print_json(&json!({ "ok": true, "runId": resolved_run_id, "events": events }));
         Ok(0)
     } else {
-        print_json(&json!({ "ok": false, "error": "run not found", "runId": run_id }));
+        print_json(&json!({ "ok": false, "error": "run not found", "runId": requested_run_id }));
         Ok(1)
     }
 }
@@ -346,6 +417,21 @@ fn cmd_settings(config: &AppConfig, command: SettingsCommand) -> Result<i32> {
                 "ok": true,
                 "settingsPath": config.paths.settings_path.display().to_string(),
                 "settings": settings,
+            }));
+            Ok(0)
+        }
+        SettingsCommand::Keys => {
+            print_json(&json!({
+                "ok": true,
+                "keys": setting_keys(),
+            }));
+            Ok(0)
+        }
+        SettingsCommand::Describe { key } => {
+            let described = describe_settings(&config.paths, key.as_deref())?;
+            print_json(&json!({
+                "ok": true,
+                "settings": described,
             }));
             Ok(0)
         }
@@ -449,13 +535,52 @@ fn resolve_query_output_mode(output: Option<&str>, as_json: bool) -> OutputMode 
     }
 }
 
+fn requested_run_selector(run_id: Option<&str>, latest: bool) -> String {
+    if wants_latest(run_id, latest) {
+        "latest".to_string()
+    } else {
+        run_id.unwrap_or_default().to_string()
+    }
+}
+
+fn wants_latest(run_id: Option<&str>, latest: bool) -> bool {
+    latest || matches!(run_id, Some(value) if value.eq_ignore_ascii_case("latest"))
+}
+
+fn resolve_target_run(
+    config: &AppConfig,
+    run_id: Option<&str>,
+    latest: bool,
+) -> Result<Option<RunRecord>> {
+    if wants_latest(run_id, latest) {
+        get_latest_agent_run(config)
+    } else if let Some(run_id) = run_id.map(str::trim).filter(|value| !value.is_empty()) {
+        get_agent_run(config, run_id)
+    } else {
+        Ok(None)
+    }
+}
+
+fn resolve_run_id_selector(
+    config: &AppConfig,
+    run_id: Option<&str>,
+    latest: bool,
+) -> Result<Option<String>> {
+    Ok(resolve_target_run(config, run_id, latest)?.map(|run| run.run_id))
+}
+
 fn print_run_result(
     run: &crate::types::RunRecord,
     output_mode: OutputMode,
+    output_last_message: bool,
     quiet: bool,
     ok: bool,
     error: Option<&Value>,
 ) {
+    if output_last_message {
+        print_last_message(run, error);
+        return;
+    }
     match output_mode {
         OutputMode::Json => {
             print_json(&build_run_result_payload(run, ok, error));
@@ -509,6 +634,37 @@ fn build_run_result_payload(
         payload["error"] = error.clone();
     }
     payload
+}
+
+fn print_last_message(run: &crate::types::RunRecord, error: Option<&Value>) {
+    if let Some(text) = run.output_text.as_ref().filter(|value| !value.is_empty()) {
+        println!("{}", text);
+    } else if let Some(message) = error
+        .and_then(extract_error_message)
+        .or_else(|| run.error.clone())
+    {
+        println!("{}", message);
+    }
+}
+
+fn extract_error_message(error: &Value) -> Option<String> {
+    if let Some(text) = error.as_str().map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    let serialized = serde_json::to_string(error).ok()?;
+    if serialized == "null" || serialized == "{}" {
+        None
+    } else {
+        Some(serialized)
+    }
 }
 
 fn print_json_line(value: &Value) {
@@ -600,6 +756,7 @@ mod tests {
             model: None,
             output: None,
             json: false,
+            output_last_message: false,
             quiet: false,
             no_persist: false,
             no_auto_launch: false,
@@ -618,6 +775,7 @@ mod tests {
             model: Some("gpt-5-4".to_string()),
             output: Some("json".to_string()),
             json: true,
+            output_last_message: false,
             quiet: true,
             no_persist: true,
             no_auto_launch: true,
@@ -633,7 +791,7 @@ mod tests {
     #[test]
     fn test_parse_resume_args() {
         let args = ResumeArgs {
-            run_id: "surf-run-abc123".to_string(),
+            run_id: Some("surf-run-abc123".to_string()),
             prompt: Some("continue".to_string()),
             prompt_option: None,
             files: vec![],
@@ -641,11 +799,13 @@ mod tests {
             model: None,
             output: None,
             json: false,
+            output_last_message: false,
             quiet: false,
+            last: false,
             no_persist: false,
             no_auto_launch: false,
         };
-        assert_eq!(args.run_id, "surf-run-abc123");
+        assert_eq!(args.run_id, Some("surf-run-abc123".to_string()));
     }
 
     #[test]
@@ -653,6 +813,8 @@ mod tests {
         // Default limit is 20
         let args = RunsArgs {
             limit: 20,
+            status: None,
+            workspace: None,
             output: ReadOutputArgs::default(),
         };
         assert_eq!(args.limit, 20);
@@ -662,9 +824,13 @@ mod tests {
     fn test_runs_args_custom_limit() {
         let args = RunsArgs {
             limit: 100,
+            status: Some("failed".to_string()),
+            workspace: Some("/workspace".to_string()),
             output: ReadOutputArgs::default(),
         };
         assert_eq!(args.limit, 100);
+        assert_eq!(args.status, Some("failed".to_string()));
+        assert_eq!(args.workspace, Some("/workspace".to_string()));
     }
 
     #[test]
@@ -677,6 +843,10 @@ mod tests {
     fn test_settings_commands() {
         // Verify SettingsCommand variants exist and work
         let show_cmd = SettingsCommand::Show;
+        let keys_cmd = SettingsCommand::Keys;
+        let describe_cmd = SettingsCommand::Describe {
+            key: Some("output".to_string()),
+        };
         let get_cmd = SettingsCommand::Get { key: "model".to_string() };
         let set_cmd = SettingsCommand::Set {
             key: "model".to_string(),
@@ -688,6 +858,14 @@ mod tests {
         match show_cmd {
             SettingsCommand::Show => (),
             _ => panic!("Expected Show"),
+        }
+        match keys_cmd {
+            SettingsCommand::Keys => (),
+            _ => panic!("Expected Keys"),
+        }
+        match describe_cmd {
+            SettingsCommand::Describe { key } => assert_eq!(key, Some("output".to_string())),
+            _ => panic!("Expected Describe"),
         }
         match get_cmd {
             SettingsCommand::Get { key } => assert_eq!(key, "model"),
@@ -716,5 +894,18 @@ mod tests {
         let short_text = "hello";
         let truncated: String = short_text.chars().take(200).collect();
         assert_eq!(truncated, "hello");
+    }
+
+    #[test]
+    fn test_requested_run_selector_prefers_latest_flag() {
+        assert_eq!(requested_run_selector(Some("run-1"), true), "latest");
+        assert_eq!(requested_run_selector(Some("latest"), false), "latest");
+        assert_eq!(requested_run_selector(Some("run-1"), false), "run-1");
+    }
+
+    #[test]
+    fn test_extract_error_message_prefers_message_field() {
+        let error = json!({ "message": "parent run not found", "code": "missing" });
+        assert_eq!(extract_error_message(&error), Some("parent run not found".to_string()));
     }
 }

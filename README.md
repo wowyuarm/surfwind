@@ -24,8 +24,12 @@ The default attach path does not use the current Windsurf UI session hook and do
 
 - `exec` and `resume` support `text`, `json`, and `stream-json` output
 - `stream-json` emits normalized `run.event` JSONL records followed by a final `run.result`
+- `exec` and `resume` support `--output-last-message` when a caller only wants the final assistant text
 - `exec` and `resume` support `--no-persist` for ephemeral runs
 - `status`, `models`, `exec`, and `resume` support `--no-auto-launch` when the caller wants side effects to stay explicit
+- `resume --last`, `show latest`, and `events latest` let callers target the newest persisted run without pre-querying the ledger
+- `runs --status <status>` and `runs --workspace <path>` support common ledger filtering from the CLI surface
+- `settings keys` and `settings describe [key]` expose the stable settings contract directly from the CLI
 - long-running runs may finish polling as `running` with HTTP-style status `202`
 
 ## Core commands
@@ -34,11 +38,13 @@ The default attach path does not use the current Windsurf UI session hook and do
 cargo run -- status --no-auto-launch
 cargo run -- models --no-auto-launch
 cargo run -- exec --workspace /path/to/repo --output stream-json --no-persist "summarize this repository"
-cargo run -- resume <run-id> "continue"
-cargo run -- runs
-cargo run -- show <run-id>
-cargo run -- events <run-id>
-cargo run -- settings show
+cargo run -- exec --workspace /path/to/repo --output-last-message "reply with the final answer only"
+cargo run -- resume --last "continue"
+cargo run -- runs --status failed --workspace /path/to/repo
+cargo run -- show latest
+cargo run -- events latest
+cargo run -- settings keys
+cargo run -- settings describe output
 ```
 
 ## Non-goals

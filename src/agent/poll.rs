@@ -12,15 +12,77 @@ use crate::translator::{build_metadata, extract_assistant_text, extract_error_sh
 use crate::types::{RunListItem, RunRecord};
 
 pub fn list_agent_runs(config: &AppConfig, limit: usize) -> Result<Vec<RunListItem>> {
-    Ok(list_runs(config, limit)?
+    list_agent_runs_filtered(config, limit, None, None)
+}
+
+pub fn list_agent_runs_filtered(
+    config: &AppConfig,
+    limit: usize,
+    status: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<Vec<RunListItem>> {
+    let fetch_limit = if status.is_some() || workspace.is_some() {
+        usize::MAX
+    } else {
+        limit.max(1)
+    };
+    Ok(list_runs(config, fetch_limit)?
         .into_iter()
         .map(|record| reconcile_and_store_run(config, record))
+        .filter(|record| matches_run_status(record, status))
+        .filter(|record| matches_run_workspace(record, workspace))
         .map(|record| summarize_run(&record))
+        .take(limit.max(1))
         .collect())
 }
 
 pub fn get_agent_run(config: &AppConfig, run_id: &str) -> Result<Option<RunRecord>> {
     Ok(get_run(config, run_id)?.map(|record| reconcile_and_store_run(config, record)))
+}
+
+pub fn get_latest_agent_run(config: &AppConfig) -> Result<Option<RunRecord>> {
+    Ok(list_runs(config, 1)?
+        .into_iter()
+        .next()
+        .map(|record| reconcile_and_store_run(config, record)))
+}
+
+fn matches_run_status(record: &RunRecord, status: Option<&str>) -> bool {
+    let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    record.status.eq_ignore_ascii_case(status)
+}
+
+fn matches_run_workspace(record: &RunRecord, workspace: Option<&str>) -> bool {
+    let Some(requested) = workspace.map(normalize_workspace_query) else {
+        return true;
+    };
+    let Some(summary) = record.summary.as_object() else {
+        return false;
+    };
+    summary
+        .get("requestedWorkspace")
+        .and_then(Value::as_str)
+        .map(normalize_workspace_query)
+        .as_ref()
+        == Some(&requested)
+        || summary
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            == Some(requested.as_str())
+}
+
+fn normalize_workspace_query(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let candidate = PathBuf::from(trimmed);
+    candidate
+        .canonicalize()
+        .unwrap_or(candidate)
+        .to_string_lossy()
+        .to_string()
 }
 
 pub(crate) fn reconcile_and_store_run(config: &AppConfig, record: RunRecord) -> RunRecord {
@@ -547,6 +609,136 @@ fn detect_workspace_escape(steps: &[Value], workspace_root: &str) -> Option<Stri
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_latest_agent_run, list_agent_runs_filtered};
+    use crate::runstore::save_run;
+    use crate::settings::{SettingsData, SettingsPaths};
+    use crate::types::RunRecord;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn create_test_config(temp_dir: &TempDir) -> crate::config::AppConfig {
+        let home = temp_dir.path().join(".surfwind");
+        crate::config::AppConfig {
+            paths: SettingsPaths {
+                home_dir: home.clone(),
+                settings_path: home.join("settings.json"),
+                runs_dir: home.join("runs"),
+                logs_dir: home.join("logs"),
+                managed_runtimes_path: home.join("managed-runtimes.json"),
+            },
+            settings: SettingsData {
+                model: "test-model".to_string(),
+                run_store_dir: temp_dir.path().join("runs").to_string_lossy().to_string(),
+                output: "text".to_string(),
+            },
+            state_dir: temp_dir.path().join("state").to_path_buf(),
+            user_settings_path: temp_dir.path().join("user_settings.pb").to_path_buf(),
+            metadata_api_key: None,
+            rpc_timeout_sec: 20.0,
+            poll_interval_ms: 800,
+            poll_max_rounds: 45,
+            auto_launch_enabled: false,
+            auto_launch_timeout_sec: 15.0,
+            auto_launch_poll_interval_ms: 500,
+            metadata_ide_name: "test".to_string(),
+            metadata_ide_version: "1.0.0".to_string(),
+            metadata_extension_name: "test".to_string(),
+            metadata_extension_version: "1.0.0".to_string(),
+            metadata_locale: "en".to_string(),
+            metadata_os: "linux".to_string(),
+        }
+    }
+
+    fn create_test_run(run_id: &str, status: &str, workspace: &str) -> RunRecord {
+        RunRecord {
+            run_id: run_id.to_string(),
+            mode: "agent".to_string(),
+            path: "/test".to_string(),
+            parent_run_id: None,
+            prompt: "test prompt".to_string(),
+            request_model: None,
+            requested_model_uid: "test-model".to_string(),
+            cascade_id: None,
+            status: status.to_string(),
+            http_status: if status == "running" { 202 } else { 200 },
+            upstream_status: None,
+            error: None,
+            output_text: Some("test output".to_string()),
+            tool_calls: vec![],
+            step_offset: 0,
+            new_step_count: 1,
+            step_count: 1,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:01Z".to_string(),
+            completed_at: Some("2024-01-01T00:00:02Z".to_string()),
+            summary: json!({
+                "requestedWorkspace": workspace,
+                "workspaceId": format!("ws_{}", run_id),
+            }),
+            events: vec![],
+        }
+    }
+
+    #[test]
+    fn returns_latest_persisted_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+
+        save_run(&config, &create_test_run("run-1", "completed", "/repo/a")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save_run(&config, &create_test_run("run-2", "failed", "/repo/b")).unwrap();
+
+        let latest = get_latest_agent_run(&config).unwrap().unwrap();
+        assert_eq!(latest.run_id, "run-2");
+    }
+
+    #[test]
+    fn filters_runs_by_status() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+
+        save_run(&config, &create_test_run("run-1", "completed", "/repo/a")).unwrap();
+        save_run(&config, &create_test_run("run-2", "failed", "/repo/b")).unwrap();
+
+        let runs = list_agent_runs_filtered(&config, 20, Some("failed"), None).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-2");
+    }
+
+    #[test]
+    fn filters_runs_by_workspace() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+        let workspace_a = temp_dir.path().join("repo-a");
+        let workspace_b = temp_dir.path().join("repo-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+
+        save_run(
+            &config,
+            &create_test_run("run-1", "completed", &workspace_a.to_string_lossy()),
+        )
+        .unwrap();
+        save_run(
+            &config,
+            &create_test_run("run-2", "failed", &workspace_b.to_string_lossy()),
+        )
+        .unwrap();
+
+        let runs = list_agent_runs_filtered(
+            &config,
+            20,
+            None,
+            Some(&workspace_b.to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "run-2");
+    }
 }
 
 fn normalize_workspace_root(workspace_root: &str) -> Option<PathBuf> {
