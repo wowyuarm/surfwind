@@ -55,7 +55,7 @@ The agent-facing CLI contract should stay explicit about:
 - deterministic artifact writes for callers that want files instead of stdout scraping
 - whether a call persists into the local run ledger
 - whether a command may auto-launch a headless runtime as a side effect
-- how callers target the latest persisted run and filter ledger reads without extra client-side plumbing
+- how callers target the latest resumable run for `resume --last` versus the newest persisted run for general ledger queries such as `show latest` and `events latest`
 
 ## Persistence model
 

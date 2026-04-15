@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::agent::{
     execute_agent_prompt, get_agent_events, get_agent_run, get_latest_agent_run,
+    get_latest_resumable_agent_run,
     list_agent_runs_filtered, resume_agent_prompt, AgentRunOptions,
 };
 use crate::config::AppConfig;
@@ -374,14 +375,25 @@ fn cmd_resume(config: &AppConfig, args: ResumeArgs) -> Result<i32> {
             return Ok(1);
         }
     };
-    let parent_run_id = match resolve_run_id_selector(config, args.run_id.as_deref(), args.last)? {
+    let wants_latest_run = wants_latest(args.run_id.as_deref(), args.last);
+    let parent_run_id = match resolve_resume_run_id_selector(config, args.run_id.as_deref(), args.last)? {
         Some(run_id) => run_id,
         None => {
-            print_json(&json!({
-                "ok": false,
-                "error": "run id is required",
-                "hint": "pass a run id, 'latest', or --last",
-            }));
+            let payload = if wants_latest_run {
+                json!({
+                    "ok": false,
+                    "error": "no resumable run found",
+                    "runId": requested_run_selector(args.run_id.as_deref(), args.last),
+                    "hint": "pass an explicit resumable run id or start a persisted exec/resume first",
+                })
+            } else {
+                json!({
+                    "ok": false,
+                    "error": "run id is required",
+                    "hint": "pass a run id, 'latest', or --last",
+                })
+            };
+            print_json(&payload);
             return Ok(1);
         }
     };
@@ -686,6 +698,18 @@ fn resolve_run_id_selector(
     latest: bool,
 ) -> Result<Option<String>> {
     Ok(resolve_target_run(config, run_id, latest)?.map(|run| run.run_id))
+}
+
+fn resolve_resume_run_id_selector(
+    config: &AppConfig,
+    run_id: Option<&str>,
+    latest: bool,
+) -> Result<Option<String>> {
+    if wants_latest(run_id, latest) {
+        Ok(get_latest_resumable_agent_run(config)?.map(|run| run.run_id))
+    } else {
+        resolve_run_id_selector(config, run_id, latest)
+    }
 }
 
 fn resolve_result_contract(args: &ResultContractArgs) -> Result<Option<ResultContract>> {
@@ -1069,7 +1093,71 @@ fn print_unsupported_output_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runstore::save_run;
+    use crate::settings::{SettingsData, SettingsPaths};
+    use crate::types::RunRecord;
+    use serde_json::json;
     use tempfile::TempDir;
+
+    fn create_test_config(temp_dir: &TempDir) -> crate::config::AppConfig {
+        let home = temp_dir.path().join(".surfwind");
+        crate::config::AppConfig {
+            paths: SettingsPaths {
+                home_dir: home.clone(),
+                settings_path: home.join("settings.json"),
+                runs_dir: home.join("runs"),
+                logs_dir: home.join("logs"),
+                managed_runtimes_path: home.join("managed-runtimes.json"),
+            },
+            settings: SettingsData {
+                model: "test-model".to_string(),
+                run_store_dir: temp_dir.path().join("runs").to_string_lossy().to_string(),
+                output: "text".to_string(),
+            },
+            state_dir: temp_dir.path().join("state").to_path_buf(),
+            user_settings_path: temp_dir.path().join("user_settings.pb").to_path_buf(),
+            metadata_api_key: None,
+            rpc_timeout_sec: 20.0,
+            poll_interval_ms: 800,
+            poll_max_rounds: 45,
+            auto_launch_enabled: false,
+            auto_launch_timeout_sec: 15.0,
+            auto_launch_poll_interval_ms: 500,
+            metadata_ide_name: "test".to_string(),
+            metadata_ide_version: "1.0.0".to_string(),
+            metadata_extension_name: "test".to_string(),
+            metadata_extension_version: "1.0.0".to_string(),
+            metadata_locale: "en".to_string(),
+            metadata_os: "linux".to_string(),
+        }
+    }
+
+    fn create_test_run(run_id: &str, cascade_id: Option<&str>) -> RunRecord {
+        RunRecord {
+            run_id: run_id.to_string(),
+            mode: "agent".to_string(),
+            path: "/test".to_string(),
+            parent_run_id: None,
+            prompt: "test prompt".to_string(),
+            request_model: None,
+            requested_model_uid: "test-model".to_string(),
+            cascade_id: cascade_id.map(ToOwned::to_owned),
+            status: "completed".to_string(),
+            http_status: 200,
+            upstream_status: None,
+            error: None,
+            output_text: Some("test output".to_string()),
+            tool_calls: vec![],
+            step_offset: 0,
+            new_step_count: 1,
+            step_count: 1,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:01Z".to_string(),
+            completed_at: Some("2024-01-01T00:00:02Z".to_string()),
+            summary: json!({}),
+            events: vec![],
+        }
+    }
 
     #[test]
     fn test_resolve_output_mode_from_config() {
@@ -1531,6 +1619,20 @@ mod tests {
         assert_eq!(requested_run_selector(Some("run-1"), true), "latest");
         assert_eq!(requested_run_selector(Some("latest"), false), "latest");
         assert_eq!(requested_run_selector(Some("run-1"), false), "run-1");
+    }
+
+    #[test]
+    fn test_resolve_resume_run_id_selector_prefers_latest_resumable_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+
+        save_run(&config, &create_test_run("run-1", Some("cascade-1"))).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save_run(&config, &create_test_run("run-2", None)).unwrap();
+
+        let selected = resolve_resume_run_id_selector(&config, None, true).unwrap();
+
+        assert_eq!(selected, Some("run-1".to_string()));
     }
 
     #[test]

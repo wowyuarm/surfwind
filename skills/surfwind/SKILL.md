@@ -31,7 +31,8 @@ Use `surfwind` as an agent-first CLI bridge, not as a human-oriented terminal UX
 ## Choose run targeting deliberately
 
 - Pass `--workspace /repo` to `exec` when the request is about a specific repository.
-- Use `resume --last`, `show latest`, and `events latest` when the newest persisted run is the intended target.
+- Use `resume --last` when you want the latest resumable persisted run.
+- Use `show latest` and `events latest` when the newest persisted run in general is the intended target.
 - Use `runs --status <status>` and `runs --workspace /repo` before a resume only when you truly need filtering rather than the latest run shortcut.
 - Do not expect `resume` to work for runs created with `--no-persist`.
 

@@ -47,6 +47,21 @@ pub fn get_latest_agent_run(config: &AppConfig) -> Result<Option<RunRecord>> {
         .map(|record| reconcile_and_store_run(config, record)))
 }
 
+pub fn get_latest_resumable_agent_run(config: &AppConfig) -> Result<Option<RunRecord>> {
+    Ok(list_runs(config, usize::MAX)?
+        .into_iter()
+        .map(|record| reconcile_and_store_run(config, record))
+        .find(run_is_resumable))
+}
+
+fn run_is_resumable(record: &RunRecord) -> bool {
+    record
+        .cascade_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+}
+
 fn matches_run_status(record: &RunRecord, status: Option<&str>) -> bool {
     let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
@@ -611,7 +626,7 @@ fn detect_workspace_escape(steps: &[Value], workspace_root: &str) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{get_latest_agent_run, list_agent_runs_filtered};
+    use super::{get_latest_agent_run, get_latest_resumable_agent_run, list_agent_runs_filtered};
     use crate::runstore::save_run;
     use crate::settings::{SettingsData, SettingsPaths};
     use crate::types::RunRecord;
@@ -692,6 +707,26 @@ mod tests {
 
         let latest = get_latest_agent_run(&config).unwrap().unwrap();
         assert_eq!(latest.run_id, "run-2");
+    }
+
+    #[test]
+    fn returns_latest_resumable_run_skipping_non_resumable_latest() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(&temp_dir);
+
+        let mut resumable = create_test_run("run-1", "completed", "/repo/a");
+        resumable.cascade_id = Some("cascade-1".to_string());
+        let latest_non_resumable = create_test_run("run-2", "failed", "/repo/b");
+
+        save_run(&config, &resumable).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        save_run(&config, &latest_non_resumable).unwrap();
+
+        let latest = get_latest_agent_run(&config).unwrap().unwrap();
+        let latest_resumable = get_latest_resumable_agent_run(&config).unwrap().unwrap();
+
+        assert_eq!(latest.run_id, "run-2");
+        assert_eq!(latest_resumable.run_id, "run-1");
     }
 
     #[test]
