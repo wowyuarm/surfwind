@@ -91,7 +91,8 @@ impl ResultContract {
                 )
             })?;
 
-        let value: Value = serde_json::from_str(raw).map_err(|err| {
+        let parse_target = extract_fenced_json(raw).unwrap_or(raw);
+        let value: Value = serde_json::from_str(parse_target).map_err(|err| {
             ContractFailure::new(
                 "invalid_json_output",
                 format!("final assistant output is not valid JSON: {err}"),
@@ -125,6 +126,22 @@ impl ResultContract {
             value,
         })
     }
+}
+
+fn extract_fenced_json(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    let without_closing = trimmed.strip_suffix("```")?;
+    let without_opening = without_closing.strip_prefix("```")?;
+    let newline_index = without_opening.find('\n')?;
+    let header = without_opening[..newline_index].trim();
+    if !header.is_empty() && !header.eq_ignore_ascii_case("json") {
+        return None;
+    }
+    let body = without_opening[newline_index + 1..].trim();
+    if body.is_empty() {
+        return None;
+    }
+    Some(body)
 }
 
 impl ContractFailure {
@@ -172,6 +189,25 @@ mod tests {
     }
 
     #[test]
+    fn strict_json_accepts_fenced_json_output() {
+        let contract = ResultContract::from_args(true, None).unwrap().unwrap();
+        let validated = contract
+            .validate_output(Some("```json\n{\"ok\":true,\"score\":1}\n```"))
+            .unwrap();
+        assert_eq!(validated.value, json!({ "ok": true, "score": 1 }));
+        assert_eq!(validated.canonical_text, "{\"ok\":true,\"score\":1}");
+    }
+
+    #[test]
+    fn strict_json_rejects_text_outside_fenced_json_output() {
+        let contract = ResultContract::from_args(true, None).unwrap().unwrap();
+        let failure = contract
+            .validate_output(Some("Here is the result:\n```json\n{\"ok\":true}\n```"))
+            .unwrap_err();
+        assert_eq!(failure.code, "invalid_json_output");
+    }
+
+    #[test]
     fn output_schema_rejects_shape_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let schema_path = temp_dir.path().join("result.schema.json");
@@ -205,6 +241,35 @@ mod tests {
             failure.details["schemaPath"],
             json!(schema_path.canonicalize().unwrap().display().to_string())
         );
+    }
+
+    #[test]
+    fn output_schema_accepts_fenced_json_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema_path = temp_dir.path().join("result.schema.json");
+        fs::write(
+            &schema_path,
+            serde_json::to_string(&json!({
+                "type": "object",
+                "required": ["answer"],
+                "properties": {
+                    "answer": { "type": "string" }
+                },
+                "additionalProperties": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let contract = ResultContract::from_args(false, Some(schema_path.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        let validated = contract
+            .validate_output(Some("```json\n{\"answer\":\"ok\"}\n```"))
+            .unwrap();
+
+        assert_eq!(validated.value, json!({ "answer": "ok" }));
+        assert_eq!(validated.canonical_text, "{\"answer\":\"ok\"}");
     }
 
     #[test]
