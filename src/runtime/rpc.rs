@@ -12,7 +12,18 @@ use crate::models::filter_public_models;
 use crate::types::{ModelInfo, RpcResponse, RuntimeState};
 
 const LANGUAGE_SERVER_RPC_PATH: &str = "exa.language_server_pb.LanguageServerService";
-static HTTP_CLIENT: Lazy<Client> = Lazy::new(Client::new);
+// All language_server RPC endpoints are served on 127.0.0.1:<port>. Ignore any
+// HTTP proxy environment variables so local RPC never gets tunneled through an
+// external proxy (e.g. a developer-side http_proxy=http://127.0.0.1:7890), which
+// would otherwise hijack runtime discovery with confusing 502s.
+static HTTP_CLIENT: Lazy<Client> = Lazy::new(build_http_client);
+
+fn build_http_client() -> Client {
+    Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build reqwest blocking client without proxy")
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -399,6 +410,10 @@ pub(crate) fn is_likely_selectable_model_uid(model_uid: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn test_collect_model_objects() {
@@ -424,5 +439,61 @@ mod tests {
         assert!(!is_likely_selectable_model_uid("gpt4"));
         assert!(!is_likely_selectable_model_uid(""));
         assert!(!is_likely_selectable_model_uid("PRIORITY_HIGH"));
+    }
+
+    #[test]
+    fn build_http_client_ignores_proxy_env_for_localhost() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().unwrap().port();
+        listener
+            .set_nonblocking(false)
+            .expect("set blocking listener");
+
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = b"{\"ok\":true}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+                let _ = tx.send(());
+            }
+        });
+
+        let original_http_proxy = std::env::var("HTTP_PROXY").ok();
+        let original_https_proxy = std::env::var("HTTPS_PROXY").ok();
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:1");
+
+        let client = build_http_client();
+        let url = format!("http://127.0.0.1:{}/ping", port);
+        let response = client
+            .post(url)
+            .timeout(Duration::from_secs(2))
+            .body("{}")
+            .send();
+
+        if let Some(value) = original_http_proxy {
+            std::env::set_var("HTTP_PROXY", value);
+        } else {
+            std::env::remove_var("HTTP_PROXY");
+        }
+        if let Some(value) = original_https_proxy {
+            std::env::set_var("HTTPS_PROXY", value);
+        } else {
+            std::env::remove_var("HTTPS_PROXY");
+        }
+
+        let response = response.expect("loopback request must bypass proxy env vars");
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        handle.join().expect("listener thread");
     }
 }
